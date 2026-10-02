@@ -924,13 +924,20 @@ export const fetchDiscordantVariants = async (params: DiscordantQueryParams = {}
 };
 
 // --- Protein Domains API Client ---
-export const fetchProteinDomains = async (idOrSymbol: string, organism: 'human' | 'yeast' = 'human'): Promise<ProteinDomain[]> => {
+export const fetchProteinDomains = async (idOrSymbol: string, organism: 'human' | 'yeast' = 'human', fallbackSymbol?: string): Promise<ProteinDomain[]> => {
   try {
     if (!idOrSymbol || idOrSymbol === 'N/A' || idOrSymbol === 'null') return [];
-    const isId = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(idOrSymbol);
-    const param = isId ? `id=${encodeURIComponent(idOrSymbol)}` : `symbol=${encodeURIComponent(idOrSymbol)}`;
-    const orgParam = organism === 'yeast' ? '&organism=4932' : '&organism=9606';
-    const response = await fetch(`/api/protein-domains?${param}${orgParam}`);
+    const cleanId = idOrSymbol.split('-')[0].trim();
+    const isId = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(cleanId);
+    const query = new URLSearchParams();
+    if (isId) {
+      query.append('id', cleanId);
+      if (fallbackSymbol && fallbackSymbol !== 'N/A') query.append('symbol', fallbackSymbol);
+    } else {
+      query.append('symbol', idOrSymbol.trim());
+    }
+    query.append('organism', organism === 'yeast' ? '4932' : '9606');
+    const response = await fetch(`/api/protein-domains?${query.toString()}`);
     if (!response.ok) return [];
     const data = await response.json();
     return data.domains || [];
@@ -941,13 +948,20 @@ export const fetchProteinDomains = async (idOrSymbol: string, organism: 'human' 
 };
 
 // --- Post-Translational Modifications API Client ---
-export const fetchProteinPtms = async (idOrSymbol: string, organism: 'human' | 'yeast' = 'human'): Promise<ProteinPtm[]> => {
+export const fetchProteinPtms = async (idOrSymbol: string, organism: 'human' | 'yeast' = 'human', fallbackSymbol?: string): Promise<ProteinPtm[]> => {
   try {
     if (!idOrSymbol || idOrSymbol === 'N/A' || idOrSymbol === 'null') return [];
-    const isId = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(idOrSymbol);
-    const param = isId ? `id=${encodeURIComponent(idOrSymbol)}` : `symbol=${encodeURIComponent(idOrSymbol)}`;
-    const orgParam = organism === 'yeast' ? '&organism=4932' : '&organism=9606';
-    const response = await fetch(`/api/protein-ptms?${param}${orgParam}`);
+    const cleanId = idOrSymbol.split('-')[0].trim();
+    const isId = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(cleanId);
+    const query = new URLSearchParams();
+    if (isId) {
+      query.append('id', cleanId);
+      if (fallbackSymbol && fallbackSymbol !== 'N/A') query.append('symbol', fallbackSymbol);
+    } else {
+      query.append('symbol', idOrSymbol.trim());
+    }
+    query.append('organism', organism === 'yeast' ? '4932' : '9606');
+    const response = await fetch(`/api/protein-ptms?${query.toString()}`);
     if (!response.ok) return [];
     const data = await response.json();
     return data.ptms || [];
@@ -958,13 +972,20 @@ export const fetchProteinPtms = async (idOrSymbol: string, organism: 'human' | '
 };
 
 // --- Functional Sites (Active, Metal, Ligand/Cofactor, SLiM Motifs) API Client ---
-export const fetchFunctionalSites = async (idOrSymbol: string, organism: 'human' | 'yeast' = 'human'): Promise<FunctionalSite[]> => {
+export const fetchFunctionalSites = async (idOrSymbol: string, organism: 'human' | 'yeast' = 'human', fallbackSymbol?: string): Promise<FunctionalSite[]> => {
   try {
     if (!idOrSymbol || idOrSymbol === 'N/A' || idOrSymbol === 'null') return [];
-    const isId = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(idOrSymbol);
-    const param = isId ? `id=${encodeURIComponent(idOrSymbol)}` : `symbol=${encodeURIComponent(idOrSymbol)}`;
-    const orgParam = organism === 'yeast' ? '&organism=4932' : '&organism=9606';
-    const response = await fetch(`/api/protein-functional-sites?${param}${orgParam}`);
+    const cleanId = idOrSymbol.split('-')[0].trim();
+    const isId = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(cleanId);
+    const query = new URLSearchParams();
+    if (isId) {
+      query.append('id', cleanId);
+      if (fallbackSymbol && fallbackSymbol !== 'N/A') query.append('symbol', fallbackSymbol);
+    } else {
+      query.append('symbol', idOrSymbol.trim());
+    }
+    query.append('organism', organism === 'yeast' ? '4932' : '9606');
+    const response = await fetch(`/api/protein-functional-sites?${query.toString()}`);
     if (!response.ok) return [];
     const data = await response.json();
     return data.sites || [];
@@ -979,8 +1000,11 @@ export const fetchProteinInterfaces = async (symbol: string, uniprotId?: string 
   try {
     if (!symbol && !uniprotId) return null;
     const query = new URLSearchParams();
-    if (symbol) query.append('symbol', symbol);
-    if (uniprotId && uniprotId !== 'N/A') query.append('uniprotId', uniprotId);
+    if (symbol && symbol !== 'N/A') query.append('symbol', symbol.trim());
+    if (uniprotId && uniprotId !== 'N/A' && uniprotId !== 'null') {
+      const cleanId = uniprotId.split('-')[0].trim();
+      query.append('uniprotId', cleanId);
+    }
     const response = await fetch(`/api/protein-interfaces?${query.toString()}`);
     if (!response.ok) return null;
     const data = await response.json();

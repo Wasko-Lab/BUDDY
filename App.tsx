@@ -426,6 +426,33 @@ export const App: React.FC = () => {
   const [visibleVariantsCount, setVisibleVariantsCount] = useState(10);
   const [variantSortBy, setVariantSortBy] = useState<'residue' | 'amScore' | 'localHomology' | 'stars' | 'submitters' | 'gnomad' | 'annotations'>('localHomology');
   const [variantSortDirection, setVariantSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [isAnnotationsLoading, setIsAnnotationsLoading] = useState(false);
+
+  // Dedicated helper to fetch protein domains, PTMs, functional sites, and interfaces
+  const loadProteinAnnotations = async (targetGeneInfo: GeneInfo) => {
+    if (!targetGeneInfo?.uniprot_id && !targetGeneInfo?.symbol) return;
+    const idToQuery = targetGeneInfo.uniprot_id || targetGeneInfo.symbol;
+    const symFallback = targetGeneInfo.symbol || undefined;
+
+    setIsAnnotationsLoading(true);
+    try {
+      const [domsRes, ptmsRes, sitesRes, intfRes] = await Promise.allSettled([
+        fetchProteinDomains(idToQuery, 'human', symFallback),
+        fetchProteinPtms(idToQuery, 'human', symFallback),
+        fetchFunctionalSites(idToQuery, 'human', symFallback),
+        fetchProteinInterfaces(targetGeneInfo.symbol, targetGeneInfo.uniprot_id)
+      ]);
+
+      if (domsRes.status === 'fulfilled') setProteinDomains(domsRes.value || []);
+      if (ptmsRes.status === 'fulfilled') setProteinPtms(ptmsRes.value || []);
+      if (sitesRes.status === 'fulfilled') setFunctionalSites(sitesRes.value || []);
+      if (intfRes.status === 'fulfilled') setProteinInterfaces(intfRes.value || null);
+    } catch (e) {
+      console.warn("Error loading protein annotations:", e);
+    } finally {
+      setIsAnnotationsLoading(false);
+    }
+  };
 
   // Memoized residue annotations map for fast lookup in filtered variants table
   const residueAnnotationsMap = useMemo(() => {
@@ -438,7 +465,10 @@ export const App: React.FC = () => {
 
     // 1. PTMs
     (proteinPtms || []).forEach(p => {
-      for (let r = p.start; r <= p.end; r++) {
+      const start = Number(p.start);
+      const end = Number(p.end || p.start);
+      if (isNaN(start)) return;
+      for (let r = start; r <= (isNaN(end) ? start : end); r++) {
         const entry = map.get(r) || { ptms: [], sites: [], interfaces: [], domains: [] };
         entry.ptms.push({
           category: p.category,
@@ -452,7 +482,10 @@ export const App: React.FC = () => {
 
     // 2. Functional Sites & Motifs
     (functionalSites || []).forEach(s => {
-      for (let r = s.start; r <= s.end; r++) {
+      const start = Number(s.start);
+      const end = Number(s.end || s.start);
+      if (isNaN(start)) return;
+      for (let r = start; r <= (isNaN(end) ? start : end); r++) {
         const entry = map.get(r) || { ptms: [], sites: [], interfaces: [], domains: [] };
         entry.sites.push({
           category: s.category,
@@ -468,7 +501,9 @@ export const App: React.FC = () => {
 
     // 3. 3D Structural Interfaces (BioGRID & PDBe-KB)
     (proteinInterfaces?.interfaceResidues || []).forEach(ir => {
-      const entry = map.get(ir.residue) || { ptms: [], sites: [], interfaces: [], domains: [] };
+      const resNum = Number(ir.residue);
+      if (isNaN(resNum) || resNum <= 0) return;
+      const entry = map.get(resNum) || { ptms: [], sites: [], interfaces: [], domains: [] };
       const partners = ir.partners || [];
       if (partners.length > 0) {
         partners.forEach(p => {
@@ -491,12 +526,15 @@ export const App: React.FC = () => {
           });
         }
       }
-      map.set(ir.residue, entry);
+      map.set(resNum, entry);
     });
 
     // 4. Domains
     (proteinDomains || []).forEach(d => {
-      for (let r = d.start; r <= d.end; r++) {
+      const start = Number(d.start);
+      const end = Number(d.end || d.start);
+      if (isNaN(start)) return;
+      for (let r = start; r <= (isNaN(end) ? start : end); r++) {
         const entry = map.get(r) || { ptms: [], sites: [], interfaces: [], domains: [] };
         if (!entry.domains.some(existing => existing.name === d.name)) {
           entry.domains.push({
@@ -510,6 +548,26 @@ export const App: React.FC = () => {
 
     return map;
   }, [proteinPtms, functionalSites, proteinInterfaces, proteinDomains]);
+
+  // Memoized 1-to-1 residue alignment map (human pos <-> yeast pos) for 3D structure homology projection
+  const alignmentMap = useMemo(() => {
+    if (!alignment?.humanSeqAligned || !alignment?.yeastSeqAligned) return undefined;
+    const map = new Map<number, number>();
+    const hSeq = alignment.humanSeqAligned;
+    const ySeq = alignment.yeastSeqAligned;
+    let hRes = 0;
+    let yRes = 0;
+    for (let i = 0; i < hSeq.length; i++) {
+      const hChar = hSeq[i];
+      const yChar = ySeq[i];
+      if (hChar !== '-') hRes++;
+      if (yChar !== '-') yRes++;
+      if (hChar !== '-' && yChar !== '-') {
+        map.set(hRes, yRes);
+      }
+    }
+    return map;
+  }, [alignment]);
 
   const sortedAndMappedVariants = useMemo(() => {
      const mapped = variants.map((v, i) => ({ v, originalIndex: i }));
@@ -537,8 +595,8 @@ export const App: React.FC = () => {
              const subB = b.v.clinVarSubmitters ?? 0;
              return variantSortDirection === 'asc' ? subA - subB : subB - subA;
          } else if (variantSortBy === 'annotations') {
-             const annotA = residueAnnotationsMap.get(a.v.residue);
-             const annotB = residueAnnotationsMap.get(b.v.residue);
+             const annotA = residueAnnotationsMap.get(Number(a.v.residue));
+             const annotB = residueAnnotationsMap.get(Number(b.v.residue));
              const countA = (annotA?.ptms.length || 0) * 10 + (annotA?.sites.length || 0) * 10 + (annotA?.interfaces.length || 0) * 5 + (annotA?.domains.length || 0);
              const countB = (annotB?.ptms.length || 0) * 10 + (annotB?.sites.length || 0) * 10 + (annotB?.interfaces.length || 0) * 5 + (annotB?.domains.length || 0);
              return variantSortDirection === 'asc' ? countA - countB : countB - countA;
@@ -863,6 +921,7 @@ export const App: React.FC = () => {
     setProteinPtms([]);
     setFunctionalSites([]);
     setProteinInterfaces(null);
+    setIsAnnotationsLoading(false);
     
     // If identifier is missing, it's a manual run, so we clear selected disease context
     if (!identifier) {
@@ -990,23 +1049,9 @@ export const App: React.FC = () => {
 
       setGeneInfo(gInfo);
       
-      // Fetch protein domains and PTMs for sequence alignment and overlays
+      // Fetch protein domains, PTMs, functional sites, and interfaces for sequence alignment and overlays
       if (gInfo?.uniprot_id || gInfo?.symbol) {
-        fetchProteinDomains(gInfo.uniprot_id || gInfo.symbol, 'human')
-          .then(doms => setProteinDomains(doms))
-          .catch(e => console.warn("Failed to fetch protein domains:", e));
-
-        fetchProteinPtms(gInfo.uniprot_id || gInfo.symbol, 'human')
-          .then(ptms => setProteinPtms(ptms))
-          .catch(e => console.warn("Failed to fetch protein PTMs:", e));
-
-        fetchFunctionalSites(gInfo.uniprot_id || gInfo.symbol, 'human')
-          .then(sites => setFunctionalSites(sites))
-          .catch(e => console.warn("Failed to fetch functional sites:", e));
-
-        fetchProteinInterfaces(gInfo.symbol, gInfo.uniprot_id)
-          .then(interfaces => setProteinInterfaces(interfaces))
-          .catch(e => console.warn("Failed to fetch protein interfaces:", e));
+        loadProteinAnnotations(gInfo);
       }
       
       if (!gInfo?.uniprot_id && !yeastOnlyMode) {
@@ -3935,6 +3980,10 @@ export const App: React.FC = () => {
                       } : undefined}
                       settings={settings.structure}
                       proteinDomains={proteinDomains}
+                      functionalSites={functionalSites}
+                      proteinPtms={proteinPtms}
+                      proteinInterfaces={proteinInterfaces}
+                      alignmentMap={alignmentMap}
                   />
               )}
 
@@ -4051,10 +4100,32 @@ export const App: React.FC = () => {
                             title="Functional sites, post-translational modifications (PTMs), short linear motifs, and 3D structural protein-protein/nucleic acid contact interfaces (Click to sort)"
                         >
                             <div className="flex items-center justify-between gap-1">
-                                <span>Sites / PTM / Interface</span>
-                                {variantSortBy === 'annotations' && (
-                                    <span className="text-emerald-500 ml-1">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
-                                )}
+                                <div className="flex items-center gap-1.5">
+                                    <span>Sites / PTM / Interface</span>
+                                    {isAnnotationsLoading && (
+                                        <span className="flex items-center text-[10px] text-emerald-500 font-normal animate-pulse">
+                                            <RefreshCw className="w-2.5 h-2.5 animate-spin mr-0.5" /> loading...
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="flex items-center gap-1">
+                                    {variantSortBy === 'annotations' && (
+                                        <span className="text-emerald-500">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
+                                    )}
+                                    {geneInfo && (
+                                        <button
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                loadProteinAnnotations(geneInfo);
+                                            }}
+                                            className="p-0.5 text-slate-400 hover:text-emerald-500 rounded transition-colors"
+                                            title="Reload Sites, PTMs, and Interfaces annotations from UniProt, BioGRID, and PDBe-KB"
+                                        >
+                                            <RefreshCw className={`w-3 h-3 ${isAnnotationsLoading ? 'animate-spin text-emerald-500' : ''}`} />
+                                        </button>
+                                    )}
+                                </div>
                             </div>
                         </th>
                         <th 
@@ -4196,8 +4267,11 @@ export const App: React.FC = () => {
                           </td>
                           <td className="px-3 py-3">
                               {(() => {
-                                  const annot = residueAnnotationsMap.get(v.residue);
+                                  const annot = residueAnnotationsMap.get(Number(v.residue));
                                   if (!annot || (annot.ptms.length === 0 && annot.sites.length === 0 && annot.interfaces.length === 0 && annot.domains.length === 0)) {
+                                      if (isAnnotationsLoading) {
+                                          return <span className="text-slate-400 dark:text-slate-500 text-xs italic animate-pulse">loading...</span>;
+                                      }
                                       return <span className="text-slate-400 dark:text-slate-500 text-xs italic">-</span>;
                                   }
 
@@ -4902,7 +4976,7 @@ export const App: React.FC = () => {
                                                     Integrate Repair Template onto Same Sequence
                                                 </span>
                                                 <span className="text-[10px] text-slate-500 dark:text-slate-400 block mt-0.5 leading-snug">
-                                                    Generates a single All-in-One ~475nt sequence: 100bp 5' upstream homology + 100nt repair template + 155bp tRNA/ribozyme linker + 20bp sgRNA + 100bp 3' terminator.
+                                                    Generates a single All-in-One ~475nt sequence: 100bp upstream homology + 100bp repair template + 155bp RNApr + 20bp sgRNA + 100bp downstream homology
                                                 </span>
                                             </div>
                                         </label>

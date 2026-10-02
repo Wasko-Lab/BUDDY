@@ -1122,6 +1122,60 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
   app.get('/api/discordant-variants', handleDiscordantVariantsRequest);
   app.post('/api/discordant-variants', handleDiscordantVariantsRequest);
 
+  // Helper to fetch UniProt entry with canonical accession normalization and symbol fallback
+  async function fetchUniProtEntry(id?: any, symbol?: any, organism?: any): Promise<any> {
+    const rawId = (typeof id === 'string' && id !== 'N/A' && id !== 'null') ? id.trim() : '';
+    const cleanId = rawId ? rawId.split('-')[0].trim() : '';
+    const cleanSymbol = (typeof symbol === 'string' && symbol !== 'N/A' && symbol !== 'null') ? symbol.trim() : '';
+    const orgId = (organism === 'yeast' || organism === '4932' || organism === '559292') ? '4932' : '9606';
+
+    let data: any = null;
+
+    // 1. Try canonical UniProt ID if provided
+    if (cleanId) {
+      try {
+        const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/${encodeURIComponent(cleanId)}.json`, {
+          signal: AbortSignal.timeout(6000)
+        });
+        if (uResp.ok) {
+          const json = await uResp.json();
+          if (json && (json.features || json.sequence)) data = json;
+        }
+      } catch {}
+    }
+
+    // 2. Fall back to Gene Symbol search if no entry or no features found
+    if ((!data || !data.features || data.features.length === 0) && cleanSymbol) {
+      try {
+        const qReviewed = `(gene_exact:${encodeURIComponent(cleanSymbol)}+OR+gene:${encodeURIComponent(cleanSymbol)})+AND+(taxonomy_id:${orgId}+OR+organism_id:${orgId})+AND+reviewed:true&size=1`;
+        const sResp = await fetch(`https://rest.uniprot.org/uniprotkb/search?query=${qReviewed}`, {
+          signal: AbortSignal.timeout(6000)
+        });
+        if (sResp.ok) {
+          const sData = await sResp.json();
+          if (sData.results && sData.results.length > 0) {
+            data = sData.results[0];
+          }
+        }
+        // If still not found, try unreviewed/any
+        if (!data) {
+          const qAny = `(gene_exact:${encodeURIComponent(cleanSymbol)}+OR+gene:${encodeURIComponent(cleanSymbol)})+AND+(taxonomy_id:${orgId}+OR+organism_id:${orgId})&size=1`;
+          const aResp = await fetch(`https://rest.uniprot.org/uniprotkb/search?query=${qAny}`, {
+            signal: AbortSignal.timeout(6000)
+          });
+          if (aResp.ok) {
+            const aData = await aResp.json();
+            if (aData.results && aData.results.length > 0) {
+              data = aData.results[0];
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return data;
+  }
+
   // --- /api/protein-domains (Proxy and extract UniProt protein domain annotations) ---
   const domainCache = new Map<string, any[]>();
   app.get('/api/protein-domains', async (req, res) => {
@@ -1132,23 +1186,7 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         return res.json({ domains: domainCache.get(cacheKey) });
       }
 
-      let data: any = null;
-      if (id && typeof id === 'string' && id !== 'N/A' && id !== 'null') {
-        const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/${encodeURIComponent(id)}.json`);
-        if (uResp.ok) data = await uResp.json();
-      }
-
-      if (!data && symbol && typeof symbol === 'string') {
-        const orgId = organism === 'yeast' || organism === '4932' ? '4932' : '9606';
-        const sResp = await fetch(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${encodeURIComponent(symbol)}+AND+organism_id:${orgId}+AND+reviewed:true&size=1`);
-        if (sResp.ok) {
-          const sData = await sResp.json();
-          if (sData.results && sData.results.length > 0) {
-            data = sData.results[0];
-          }
-        }
-      }
-
+      const data = await fetchUniProtEntry(id, symbol, organism);
       if (!data) {
         return res.json({ domains: [] });
       }
@@ -1247,27 +1285,7 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         return res.json({ ptms: ptmCache.get(cacheKey) });
       }
 
-      let data: any = null;
-      if (id && typeof id === 'string' && id !== 'N/A' && id !== 'null') {
-        const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/${encodeURIComponent(id)}.json`);
-        if (uResp.ok) data = await uResp.json();
-      }
-
-      if (!data && symbol && typeof symbol === 'string') {
-        const isYeast = organism === 'yeast' || organism === '4932' || organism === '559292';
-        const queryStr = isYeast
-          ? `(gene_exact:${encodeURIComponent(symbol)}+OR+gene:${encodeURIComponent(symbol)})+AND+(taxonomy_id:559292+OR+taxonomy_id:4932)&size=1`
-          : `gene_exact:${encodeURIComponent(symbol)}+AND+taxonomy_id:9606+AND+reviewed:true&size=1`;
-        
-        const sResp = await fetch(`https://rest.uniprot.org/uniprotkb/search?query=${queryStr}`);
-        if (sResp.ok) {
-          const sData = await sResp.json();
-          if (sData.results && sData.results.length > 0) {
-            data = sData.results[0];
-          }
-        }
-      }
-
+      const data = await fetchUniProtEntry(id, symbol, organism);
       if (!data) {
         return res.json({ ptms: [] });
       }
@@ -1553,61 +1571,73 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
       let targetSequence = '';
 
       if (!targetUniProt && targetSymbol) {
-        const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${encodeURIComponent(targetSymbol)}+AND+taxonomy_id:9606+AND+reviewed:true&size=1`);
-        if (uResp.ok) {
-          const uData = await uResp.json();
-          if (uData.results && uData.results.length > 0) {
-            targetUniProt = uData.results[0].primaryAccession;
-            targetSequence = uData.results[0].sequence?.value || '';
-          }
-        }
-      } else if (targetUniProt && !targetSequence) {
-        const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/${encodeURIComponent(targetUniProt)}.json`);
-        if (uResp.ok) {
-          const uData = await uResp.json();
-          targetSequence = uData.sequence?.value || '';
-          if (!targetSymbol) {
-            targetSymbol = uData.genes?.[0]?.geneName?.value || targetUniProt;
-          }
-        }
-      }
-
-      // 2. Query BioGRID for primary interacting partners
-      const partnersMap = new Map<string, { partner: string; count: number; exps: Set<string>; pubmeds: Set<string> }>();
-      if (targetSymbol) {
         try {
-          const bgUrl = `https://webservice.thebiogrid.org/interactions/?searchNames=true&geneList=${encodeURIComponent(targetSymbol)}&includeInteractors=true&taxId=9606&format=json&accessKey=${BIOGRID_ACCESS_KEY}&max=100`;
-          const bgRes = await fetch(bgUrl);
-          if (bgRes.ok) {
-            const bgData = await bgRes.json();
-            for (const k of Object.keys(bgData)) {
-              const it = bgData[k];
-              const partner = (it.OFFICIAL_SYMBOL_A === targetSymbol) ? it.OFFICIAL_SYMBOL_B : it.OFFICIAL_SYMBOL_A;
-              if (!partner || partner === targetSymbol) continue;
-              const cur = partnersMap.get(partner) || { partner, count: 0, exps: new Set(), pubmeds: new Set() };
-              cur.count++;
-              if (it.EXPERIMENTAL_SYSTEM) cur.exps.add(it.EXPERIMENTAL_SYSTEM);
-              if (it.PUBMED_ID) cur.pubmeds.add(String(it.PUBMED_ID));
-              partnersMap.set(partner, cur);
+          const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${encodeURIComponent(targetSymbol)}+AND+taxonomy_id:9606+AND+reviewed:true&size=1`, {
+            signal: AbortSignal.timeout(5000)
+          });
+          if (uResp.ok) {
+            const uData = await uResp.json();
+            if (uData.results && uData.results.length > 0) {
+              targetUniProt = uData.results[0].primaryAccession;
+              targetSequence = uData.results[0].sequence?.value || '';
             }
           }
-        } catch (e: any) {
-          console.warn("BioGRID fetch warning:", e.message);
-        }
+        } catch {}
+      } else if (targetUniProt && !targetSequence) {
+        try {
+          const uResp = await fetch(`https://rest.uniprot.org/uniprotkb/${encodeURIComponent(targetUniProt)}.json`, {
+            signal: AbortSignal.timeout(5000)
+          });
+          if (uResp.ok) {
+            const uData = await uResp.json();
+            targetSequence = uData.sequence?.value || '';
+            if (!targetSymbol) {
+              targetSymbol = uData.genes?.[0]?.geneName?.value || targetUniProt;
+            }
+          }
+        } catch {}
       }
 
-      // 3. Query PDBe-KB for 3D structural interface residues
-      let pdbeData: any = null;
-      if (targetUniProt) {
-        try {
-          const pdbeUrl = `https://www.ebi.ac.uk/pdbe/graph-api/uniprot/interface_residues/${encodeURIComponent(targetUniProt)}`;
-          const pdbeRes = await fetch(pdbeUrl);
-          if (pdbeRes.ok) {
-            const j = await pdbeRes.json();
-            pdbeData = j[targetUniProt] || null;
+      // 2 & 3. Query BioGRID and PDBe-KB in PARALLEL
+      const [bgData, pdbeData] = await Promise.all([
+        (async () => {
+          if (!targetSymbol) return null;
+          try {
+            const bgUrl = `https://webservice.thebiogrid.org/interactions/?searchNames=true&geneList=${encodeURIComponent(targetSymbol)}&includeInteractors=true&taxId=9606&format=json&accessKey=${BIOGRID_ACCESS_KEY}&max=100`;
+            const bgRes = await fetch(bgUrl, { signal: AbortSignal.timeout(6000) });
+            if (bgRes.ok) return await bgRes.json();
+          } catch (e: any) {
+            console.warn("BioGRID fetch warning:", e.message);
           }
-        } catch (e: any) {
-          console.warn("PDBe-KB fetch warning:", e.message);
+          return null;
+        })(),
+        (async () => {
+          if (!targetUniProt) return null;
+          try {
+            const pdbeUrl = `https://www.ebi.ac.uk/pdbe/graph-api/uniprot/interface_residues/${encodeURIComponent(targetUniProt)}`;
+            const pdbeRes = await fetch(pdbeUrl, { signal: AbortSignal.timeout(6000) });
+            if (pdbeRes.ok) {
+              const j = await pdbeRes.json();
+              return j[targetUniProt] || null;
+            }
+          } catch (e: any) {
+            console.warn("PDBe-KB fetch warning:", e.message);
+          }
+          return null;
+        })()
+      ]);
+
+      const partnersMap = new Map<string, { partner: string; count: number; exps: Set<string>; pubmeds: Set<string> }>();
+      if (bgData) {
+        for (const k of Object.keys(bgData)) {
+          const it = bgData[k];
+          const partner = (it.OFFICIAL_SYMBOL_A === targetSymbol) ? it.OFFICIAL_SYMBOL_B : it.OFFICIAL_SYMBOL_A;
+          if (!partner || partner === targetSymbol) continue;
+          const cur = partnersMap.get(partner) || { partner, count: 0, exps: new Set(), pubmeds: new Set() };
+          cur.count++;
+          if (it.EXPERIMENTAL_SYSTEM) cur.exps.add(it.EXPERIMENTAL_SYSTEM);
+          if (it.PUBMED_ID) cur.pubmeds.add(String(it.PUBMED_ID));
+          partnersMap.set(partner, cur);
         }
       }
 
@@ -1620,7 +1650,9 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
       const geneMap: Record<string, { gene: string; fullName?: string }> = {};
       if (rawAccessions.length > 0) {
         try {
-          const uRes = await fetch(`https://rest.uniprot.org/uniprotkb/accessions?accessions=${rawAccessions.slice(0, 40).join(',')}`);
+          const uRes = await fetch(`https://rest.uniprot.org/uniprotkb/accessions?accessions=${rawAccessions.slice(0, 40).join(',')}`, {
+            signal: AbortSignal.timeout(5000)
+          });
           if (uRes.ok) {
             const uData = await uRes.json();
             for (const r of uData.results || []) {
@@ -1662,8 +1694,9 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         const pdbSet = new Set<string>();
 
         for (const r of (item.residues || [])) {
-          const idx = r.startIndex;
-          if (typeof idx === 'number' && idx > 0) {
+          const rawIdx = r.startIndex;
+          const idx = typeof rawIdx === 'number' ? rawIdx : parseInt(rawIdx, 10);
+          if (!isNaN(idx) && idx > 0) {
             resSet.add(idx);
             allInterfaceIndices.add(idx);
             if (Array.isArray(r.interactingPDBEntries)) {

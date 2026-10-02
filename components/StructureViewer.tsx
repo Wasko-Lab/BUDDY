@@ -1,8 +1,8 @@
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Camera, ExternalLink, AlertCircle, RotateCw, Box, Layers, Eye, EyeOff, Palette, Move, MousePointer2, RefreshCw, Check, Database, Save, X, Dna, ChevronDown, Shuffle } from 'lucide-react';
+import { Camera, ExternalLink, AlertCircle, RotateCw, Box, Layers, Eye, EyeOff, Palette, Move, MousePointer2, RefreshCw, Check, Database, Save, X, Dna, ChevronDown, Shuffle, Target, Zap, Users, Sparkles, Filter } from 'lucide-react';
 import { calculateKabschTransform, applyTransform, Point3D, OverlayAlgorithmType, AlignmentMetrics, OVERLAY_ALGORITHMS, computeSuperposition } from '../utils/superposition';
-import { AdvancedSettings, ProteinDomain } from '../types';
+import { AdvancedSettings, ProteinDomain, FunctionalSite, ProteinPtm, ProteinInterfaceData } from '../types';
 
 declare global {
   interface Window {
@@ -27,6 +27,9 @@ interface Props {
   alignmentMap?: Map<number, number>; 
   settings?: AdvancedSettings['structure'];
   proteinDomains?: ProteinDomain[];
+  functionalSites?: FunctionalSite[];
+  proteinPtms?: ProteinPtm[];
+  proteinInterfaces?: ProteinInterfaceData | null;
 }
 
 type ViewMode = 'human' | 'yeast' | 'overlay';
@@ -45,11 +48,17 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   highlightsBySpecies,
   alignmentMap,
   settings,
-  proteinDomains = []
+  proteinDomains = [],
+  functionalSites = [],
+  proteinPtms = [],
+  proteinInterfaces = null
 }, ref) => {
   const [viewMode, setViewMode] = useState<ViewMode>(initialSpecies);
   const [representation, setRepresentation] = useState<Representation>('cartoon');
   const [variantRepresentation, setVariantRepresentation] = useState<Representation>('sphere');
+  type FeatureRepresentation = 'cartoon' | 'stick' | 'surface';
+  const [siteRepresentation, setSiteRepresentation] = useState<FeatureRepresentation>('stick');
+  const [interfaceRepresentation, setInterfaceRepresentation] = useState<FeatureRepresentation>('surface');
   
   // ID State (allows manual override)
   const [activeHumanId, setActiveHumanId] = useState<string | null>(humanUniprot);
@@ -58,10 +67,157 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   const [humanInput, setHumanInput] = useState('');
   const [yeastInput, setYeastInput] = useState('');
 
-  // 3D Domain Overlays State (Individual domains can be enabled/disabled on the fly and display in different colors - default all off)
+  // Unified 3D Feature Overlays State (ALL DEFAULT OFF)
+  type AnnotationTab = 'sites' | 'ptms' | 'interfaces' | 'domains';
+  const [activeAnnotationTab, setActiveAnnotationTab] = useState<AnnotationTab | null>(null);
+
+  // 1. Sites & Motifs State (default OFF)
+  const [enabledSiteIds, setEnabledSiteIds] = useState<Set<string>>(new Set());
+  const [siteColors, setSiteColors] = useState<Record<string, string>>({});
+  const [siteFilterCategory, setSiteFilterCategory] = useState<string>('ALL');
+
+  const toggleSite = (siteId: string) => {
+    setEnabledSiteIds(prev => {
+      const next = new Set(prev);
+      if (next.has(siteId)) next.delete(siteId);
+      else next.add(siteId);
+      return next;
+    });
+  };
+
+  const enableAllSites = () => {
+    setEnabledSiteIds(new Set(functionalSites.map(s => s.id)));
+  };
+
+  const disableAllSites = () => {
+    setEnabledSiteIds(new Set());
+  };
+
+  const toggleSiteCategory = (cat: string) => {
+    const catSites = functionalSites.filter(s => s.category === cat);
+    const allOn = catSites.length > 0 && catSites.every(s => enabledSiteIds.has(s.id));
+    setEnabledSiteIds(prev => {
+      const next = new Set(prev);
+      catSites.forEach(s => {
+        if (allOn) next.delete(s.id);
+        else next.add(s.id);
+      });
+      return next;
+    });
+  };
+
+  const setCustomSiteColor = (siteId: string, color: string) => {
+    setSiteColors(prev => ({ ...prev, [siteId]: color }));
+  };
+
+  const focusSite = (s: FunctionalSite) => {
+    if (!viewerRef.current) return;
+    const v = viewerRef.current;
+    if (!enabledSiteIds.has(s.id)) {
+      setEnabledSiteIds(prev => new Set([...prev, s.id]));
+    }
+    const resList: number[] = [];
+    for (let r = s.start; r <= s.end; r++) resList.push(r);
+    v.zoomTo({ resi: resList });
+  };
+
+  // 2. PTMs State (default OFF)
+  const [enabledPtmIds, setEnabledPtmIds] = useState<Set<string>>(new Set());
+  const [ptmColors, setPtmColors] = useState<Record<string, string>>({});
+  const [ptmFilterCategory, setPtmFilterCategory] = useState<string>('ALL');
+
+  const togglePtm = (ptmId: string) => {
+    setEnabledPtmIds(prev => {
+      const next = new Set(prev);
+      if (next.has(ptmId)) next.delete(ptmId);
+      else next.add(ptmId);
+      return next;
+    });
+  };
+
+  const enableAllPtms = () => {
+    setEnabledPtmIds(new Set(proteinPtms.map(p => p.id)));
+  };
+
+  const disableAllPtms = () => {
+    setEnabledPtmIds(new Set());
+  };
+
+  const togglePtmCategory = (cat: string) => {
+    const catPtms = proteinPtms.filter(p => p.category === cat);
+    const allOn = catPtms.length > 0 && catPtms.every(p => enabledPtmIds.has(p.id));
+    setEnabledPtmIds(prev => {
+      const next = new Set(prev);
+      catPtms.forEach(p => {
+        if (allOn) next.delete(p.id);
+        else next.add(p.id);
+      });
+      return next;
+    });
+  };
+
+  const setCustomPtmColor = (ptmId: string, color: string) => {
+    setPtmColors(prev => ({ ...prev, [ptmId]: color }));
+  };
+
+  const focusPtm = (p: ProteinPtm) => {
+    if (!viewerRef.current) return;
+    const v = viewerRef.current;
+    if (!enabledPtmIds.has(p.id)) {
+      setEnabledPtmIds(prev => new Set([...prev, p.id]));
+    }
+    const resList: number[] = [];
+    for (let r = p.start; r <= p.end; r++) resList.push(r);
+    v.zoomTo({ resi: resList });
+  };
+
+  // 3. 3D Contact Interfaces State (default OFF)
+  const [showAllInterfaces, setShowAllInterfaces] = useState<boolean>(false);
+  const [enabledInterfacePartners, setEnabledInterfacePartners] = useState<Set<string>>(new Set());
+  const [interfaceColors, setInterfaceColors] = useState<Record<string, string>>({});
+
+  const toggleAllInterfaces = () => {
+    setShowAllInterfaces(prev => !prev);
+  };
+
+  const toggleInterfacePartner = (partnerSymbol: string) => {
+    setEnabledInterfacePartners(prev => {
+      const next = new Set(prev);
+      if (next.has(partnerSymbol)) next.delete(partnerSymbol);
+      else next.add(partnerSymbol);
+      return next;
+    });
+  };
+
+  const enableAllInterfacePartners = () => {
+    setShowAllInterfaces(true);
+    const allPartners = (proteinInterfaces?.interfacePartners || []).map(p => p.partnerSymbol);
+    setEnabledInterfacePartners(new Set(allPartners));
+  };
+
+  const disableAllInterfaces = () => {
+    setShowAllInterfaces(false);
+    setEnabledInterfacePartners(new Set());
+  };
+
+  const setCustomInterfaceColor = (partnerSymbol: string, color: string) => {
+    setInterfaceColors(prev => ({ ...prev, [partnerSymbol]: color }));
+  };
+
+  const focusInterfaceResidues = (residues: number[], partnerSymbol?: string) => {
+    if (!viewerRef.current || !residues.length) return;
+    const v = viewerRef.current;
+    if (partnerSymbol && !enabledInterfacePartners.has(partnerSymbol)) {
+      setEnabledInterfacePartners(prev => new Set([...prev, partnerSymbol]));
+    } else if (!partnerSymbol && !showAllInterfaces) {
+      setShowAllInterfaces(true);
+    }
+    v.zoomTo({ resi: residues });
+  };
+
+  // 4. 3D Domain Overlays State (default OFF)
   const [enabledDomainIds, setEnabledDomainIds] = useState<Set<string>>(new Set());
   const [domainColors, setDomainColors] = useState<Record<string, string>>({});
-  const [showDomainControls, setShowDomainControls] = useState<boolean>(false);
 
   // Toggle individual domain on/off on the fly
   const toggleDomain = (domainId: string) => {
@@ -640,6 +796,62 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
           }
       };
 
+      const applyInterfaceStyle = (targetModel: any, residues: number[], color: string) => {
+          if (!residues || residues.length === 0 || !targetModel) return;
+          const sel = { model: targetModel, resi: residues };
+          if (interfaceRepresentation === 'surface') {
+              v.addSurface(window.$3Dmol.SurfaceType.VDW, { opacity: 0.85, color }, sel);
+          } else if (interfaceRepresentation === 'stick') {
+              v.addStyle(sel, { stick: { color, radius: 0.3 } });
+          } else {
+              v.addStyle(sel, { cartoon: { color, thickness: 1.3, opacity: 1.0 } });
+          }
+      };
+
+      const applySiteStyle = (targetModel: any, residues: number[], color: string) => {
+          if (!residues || residues.length === 0 || !targetModel) return;
+          const sel = { model: targetModel, resi: residues };
+          if (siteRepresentation === 'surface') {
+              v.addSurface(window.$3Dmol.SurfaceType.VDW, { opacity: 0.9, color }, sel);
+          } else if (siteRepresentation === 'stick') {
+              v.addStyle(sel, { stick: { color, radius: 0.35 } });
+          } else {
+              v.addStyle(sel, { cartoon: { color, thickness: 1.3, opacity: 1.0 } });
+          }
+      };
+
+      const applyPtmStyle = (targetModel: any, residues: number[], color: string, badge?: string) => {
+          if (!residues || residues.length === 0 || !targetModel) return;
+          const sel = { model: targetModel, resi: residues };
+          if (representation === 'surface') {
+              v.addSurface(window.$3Dmol.SurfaceType.VDW, { opacity: 0.94, color }, sel);
+          } else {
+              v.addStyle(sel, {
+                  cartoon: { color, thickness: 1.15, opacity: 1.0 },
+                  stick: { color, radius: 0.32 },
+                  sphere: { color, scale: 0.65 }
+              });
+          }
+          if (badge && residues.length === 1) {
+              v.addLabel(`${badge}${residues[0]}`, {
+                  position: { resi: residues[0] },
+                  backgroundColor: 'rgba(15, 23, 42, 0.85)',
+                  fontColor: color,
+                  fontSize: 10
+              });
+          }
+      };
+
+      const mapHumanToYeast = (hResList: number[]): number[] => {
+          if (!alignmentMap || alignmentMap.size === 0) return [];
+          const yList: number[] = [];
+          alignmentMap.forEach((val, key) => {
+              if (hResList.includes(key)) yList.push(val);
+              else if (hResList.includes(val)) yList.push(key);
+          });
+          return yList;
+      };
+
       if (viewMode === 'overlay') {
           const { yeast, human } = v.custom_models;
           
@@ -655,8 +867,6 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
           } else {
               yeast.setStyle({}, getStyle(representation, colors.yeastBase, 0.7));
           }
-          // Variants
-          yRes?.forEach((h: Highlight) => applyVariantStyle(yeast, h.residue, colors.yeastVariant));
 
           // 2. Human Style
           if (representation === 'surface') {
@@ -676,17 +886,68 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                   applyDomainStyle(human, resList, dColor);
 
                   // Also overlay homologous yeast region if alignmentMap is present
-                  if (alignmentMap && alignmentMap.size > 0) {
-                      const yList: number[] = [];
-                      alignmentMap.forEach((hRes, yRes) => {
-                          if (hRes >= d.start && hRes <= d.end) yList.push(yRes);
-                      });
-                      applyDomainStyle(yeast, yList, dColor);
+                  const yList = mapHumanToYeast(resList);
+                  if (yList.length > 0) applyDomainStyle(yeast, yList, dColor);
+              });
+          }
+
+          // 4. Contact Interfaces Overlays (Overlay Mode)
+          if (proteinInterfaces && (showAllInterfaces || enabledInterfacePartners.size > 0)) {
+              let intfResList: number[] = [];
+              if (showAllInterfaces) {
+                  intfResList = proteinInterfaces.allInterfaceResidueIndices || [];
+              } else {
+                  const resSet = new Set<number>();
+                  (proteinInterfaces.interfacePartners || []).forEach(p => {
+                      if (enabledInterfacePartners.has(p.partnerSymbol)) {
+                          (p.residues || []).forEach(r => resSet.add(r));
+                      }
+                  });
+                  intfResList = Array.from(resSet);
+              }
+              if (intfResList.length > 0) {
+                  applyInterfaceStyle(human, intfResList, '#10b981');
+                  const yIntfList = mapHumanToYeast(intfResList);
+                  if (yIntfList.length > 0) applyInterfaceStyle(yeast, yIntfList, '#10b981');
+              }
+          }
+
+          // 5. Sites & Motifs Overlays (Overlay Mode)
+          if (functionalSites && functionalSites.length > 0 && enabledSiteIds.size > 0) {
+              functionalSites.forEach(s => {
+                  if (!enabledSiteIds.has(s.id)) return;
+                  const sColor = siteColors[s.id] || s.color || '#e11d48';
+                  const resList: number[] = [];
+                  for (let r = s.start; r <= s.end; r++) resList.push(r);
+                  if (s.source !== 'yeast') {
+                      applySiteStyle(human, resList, sColor);
+                      const yList = mapHumanToYeast(resList);
+                      if (yList.length > 0) applySiteStyle(yeast, yList, sColor);
+                  } else {
+                      applySiteStyle(yeast, resList, sColor);
                   }
               });
           }
 
-          // Variants
+          // 6. PTM Overlays (Overlay Mode)
+          if (proteinPtms && proteinPtms.length > 0 && enabledPtmIds.size > 0) {
+              proteinPtms.forEach(p => {
+                  if (!enabledPtmIds.has(p.id)) return;
+                  const pColor = ptmColors[p.id] || p.color || '#f59e0b';
+                  const resList: number[] = [];
+                  for (let r = p.start; r <= p.end; r++) resList.push(r);
+                  if (p.source !== 'yeast') {
+                      applyPtmStyle(human, resList, pColor, p.badge);
+                      const yList = mapHumanToYeast(resList);
+                      if (yList.length > 0) applyPtmStyle(yeast, yList, pColor, p.badge);
+                  } else {
+                      applyPtmStyle(yeast, resList, pColor, p.badge);
+                  }
+              });
+          }
+
+          // 7. Variants (always on top)
+          yRes?.forEach((h: Highlight) => applyVariantStyle(yeast, h.residue, colors.yeastVariant));
           hRes?.forEach((h: Highlight) => applyVariantStyle(human, h.residue, colors.humanVariant));
 
       } else {
@@ -714,17 +975,74 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                       const resList: number[] = [];
                       for (let r = d.start; r <= d.end; r++) resList.push(r);
                       applyDomainStyle(model, resList, dColor);
-                  } else if (viewMode === 'yeast' && alignmentMap && alignmentMap.size > 0) {
-                      const yList: number[] = [];
-                      alignmentMap.forEach((hRes, yRes) => {
-                          if (hRes >= d.start && hRes <= d.end) yList.push(yRes);
-                      });
-                      applyDomainStyle(model, yList, dColor);
+                  } else if (viewMode === 'yeast') {
+                      const resList: number[] = [];
+                      for (let r = d.start; r <= d.end; r++) resList.push(r);
+                      const yList = mapHumanToYeast(resList);
+                      if (yList.length > 0) applyDomainStyle(model, yList, dColor);
                   }
               });
           }
 
-          // Variants
+          // Contact Interfaces Overlays (Single Mode)
+          if (proteinInterfaces && (showAllInterfaces || enabledInterfacePartners.size > 0)) {
+              let intfResList: number[] = [];
+              if (showAllInterfaces) {
+                  intfResList = proteinInterfaces.allInterfaceResidueIndices || [];
+              } else {
+                  const resSet = new Set<number>();
+                  (proteinInterfaces.interfacePartners || []).forEach(p => {
+                      if (enabledInterfacePartners.has(p.partnerSymbol)) {
+                          (p.residues || []).forEach(r => resSet.add(r));
+                      }
+                  });
+                  intfResList = Array.from(resSet);
+              }
+              if (intfResList.length > 0) {
+                  const resToApply = viewMode === 'human' ? intfResList : mapHumanToYeast(intfResList);
+                  if (resToApply.length > 0) applyInterfaceStyle(model, resToApply, '#10b981');
+              }
+          }
+
+          // Sites & Motifs Overlays (Single Mode)
+          if (functionalSites && functionalSites.length > 0 && enabledSiteIds.size > 0) {
+              functionalSites.forEach(s => {
+                  if (!enabledSiteIds.has(s.id)) return;
+                  const sColor = siteColors[s.id] || s.color || '#e11d48';
+                  const resList: number[] = [];
+                  for (let r = s.start; r <= s.end; r++) resList.push(r);
+
+                  let resToApply: number[] = [];
+                  if (viewMode === 'human') {
+                      if (s.source !== 'yeast') resToApply = resList;
+                  } else {
+                      if (s.source === 'yeast') resToApply = resList;
+                      else resToApply = mapHumanToYeast(resList);
+                  }
+                  if (resToApply.length > 0) applySiteStyle(model, resToApply, sColor);
+              });
+          }
+
+          // PTM Overlays (Single Mode)
+          if (proteinPtms && proteinPtms.length > 0 && enabledPtmIds.size > 0) {
+              proteinPtms.forEach(p => {
+                  if (!enabledPtmIds.has(p.id)) return;
+                  const pColor = ptmColors[p.id] || p.color || '#f59e0b';
+                  const resList: number[] = [];
+                  for (let r = p.start; r <= p.end; r++) resList.push(r);
+
+                  let resToApply: number[] = [];
+                  if (viewMode === 'human') {
+                      if (p.source !== 'yeast') resToApply = resList;
+                  } else {
+                      if (p.source === 'yeast') resToApply = resList;
+                      else resToApply = mapHumanToYeast(resList);
+                  }
+                  if (resToApply.length > 0) applyPtmStyle(model, resToApply, pColor, p.badge);
+              });
+          }
+
+          // Variants (always on top)
           highlights?.forEach((h: Highlight) => {
               applyVariantStyle(model, h.residue, colors.singleVariant);
               // Label
@@ -748,10 +1066,30 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
       }
   }, [viewMode, activeHumanId, activeYeastId]); 
 
-  // Re-render when display options or domain overlays change
+  // Re-render when display options, domains, sites, PTMs, or interfaces overlays change
   useEffect(() => {
       updateRender();
-  }, [representation, variantRepresentation, colors, activeHighlights, enabledDomainIds, domainColors, proteinDomains]);
+  }, [
+      representation, 
+      variantRepresentation, 
+      siteRepresentation,
+      interfaceRepresentation,
+      colors, 
+      activeHighlights, 
+      enabledDomainIds, 
+      domainColors, 
+      proteinDomains,
+      enabledSiteIds,
+      siteColors,
+      functionalSites,
+      enabledPtmIds,
+      ptmColors,
+      proteinPtms,
+      showAllInterfaces,
+      enabledInterfacePartners,
+      interfaceColors,
+      proteinInterfaces
+  ]);
 
   const handleSnapshot = () => {
       if (!viewerRef.current) return;
@@ -940,21 +1278,99 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                         )}
                     </div>
                 )}
-                {proteinDomains && proteinDomains.length > 0 && (
+                {/* 3D Feature Overlays Toolbar Group (Sites, PTMs, Interfaces, Domains - Default OFF) */}
+                <div className="flex items-center gap-1 bg-slate-800/80 p-0.5 rounded-lg border border-slate-700">
+                    {/* Sites & Motifs */}
                     <button 
                         type="button"
-                        onClick={() => setShowDomainControls(!showDomainControls)}
+                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'sites' ? null : 'sites')}
+                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                            enabledSiteIds.size > 0
+                                ? 'bg-rose-600 text-white border-rose-500 shadow-sm'
+                                : activeAnnotationTab === 'sites'
+                                    ? 'bg-slate-700 text-white border-slate-500'
+                                    : 'bg-slate-800 text-slate-300 hover:text-white border-slate-700 hover:border-slate-600'
+                        }`}
+                        title="3D Sites & Motifs: Active catalytic sites, metal coordination, ligand binding, SLiMs (Default: Off)"
+                    >
+                        <Target className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Sites</span>
+                        {enabledSiteIds.size > 0 ? (
+                            <span className="px-1.5 py-0.2 bg-white text-rose-900 rounded-full text-[10px] font-black">
+                                {enabledSiteIds.size}
+                            </span>
+                        ) : (
+                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                        )}
+                    </button>
+
+                    {/* PTMs */}
+                    <button 
+                        type="button"
+                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'ptms' ? null : 'ptms')}
+                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                            enabledPtmIds.size > 0
+                                ? 'bg-amber-600 text-white border-amber-500 shadow-sm'
+                                : activeAnnotationTab === 'ptms'
+                                    ? 'bg-slate-700 text-white border-slate-500'
+                                    : 'bg-slate-800 text-slate-300 hover:text-white border-slate-700 hover:border-slate-600'
+                        }`}
+                        title="3D Post-Translational Modifications: Phosphorylation, Acetylation, Ubiquitination, etc. (Default: Off)"
+                    >
+                        <Zap className="w-3.5 h-3.5 text-amber-400" />
+                        <span>PTMs</span>
+                        {enabledPtmIds.size > 0 ? (
+                            <span className="px-1.5 py-0.2 bg-white text-amber-900 rounded-full text-[10px] font-black">
+                                {enabledPtmIds.size}
+                            </span>
+                        ) : (
+                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                        )}
+                    </button>
+
+                    {/* Interfaces */}
+                    <button 
+                        type="button"
+                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'interfaces' ? null : 'interfaces')}
+                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                            showAllInterfaces || enabledInterfacePartners.size > 0
+                                ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                                : activeAnnotationTab === 'interfaces'
+                                    ? 'bg-slate-700 text-white border-slate-500'
+                                    : 'bg-slate-800 text-slate-300 hover:text-white border-slate-700 hover:border-slate-600'
+                        }`}
+                        title="3D Contact Interfaces: Protein-protein & nucleic acid structural contacts from BioGRID/PDBe-KB (Default: Off)"
+                    >
+                        <Users className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>Interfaces</span>
+                        {showAllInterfaces ? (
+                            <span className="px-1.5 py-0.2 bg-white text-emerald-900 rounded-full text-[10px] font-black">
+                                All
+                            </span>
+                        ) : enabledInterfacePartners.size > 0 ? (
+                            <span className="px-1.5 py-0.2 bg-white text-emerald-900 rounded-full text-[10px] font-black">
+                                {enabledInterfacePartners.size}
+                            </span>
+                        ) : (
+                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                        )}
+                    </button>
+
+                    {/* Domains */}
+                    <button 
+                        type="button"
+                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'domains' ? null : 'domains')}
                         className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
                             enabledDomainIds.size > 0
                                 ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
-                                : showDomainControls
+                                : activeAnnotationTab === 'domains'
                                     ? 'bg-slate-700 text-white border-slate-500'
-                                    : 'bg-slate-800 text-slate-300 hover:text-white border-slate-600'
+                                    : 'bg-slate-800 text-slate-300 hover:text-white border-slate-700 hover:border-slate-600'
                         }`}
-                        title="3D Domain Overlays (Toggle individual protein domains on 3D structure)"
+                        title="3D Protein Domains (Pfam, UniProt, SMART domains) (Default: Off)"
                     >
                         <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>3D Domains</span>
+                        <span>Domains</span>
                         {enabledDomainIds.size > 0 ? (
                             <span className="px-1.5 py-0.2 bg-white text-indigo-900 rounded-full text-[10px] font-black">
                                 {enabledDomainIds.size}
@@ -963,7 +1379,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                             <span className="text-[10px] text-slate-400 font-normal">Off</span>
                         )}
                     </button>
-                )}
+                </div>
                 <button 
                     onClick={handleSnapshot}
                     disabled={loading || !!error}
@@ -978,7 +1394,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
         {/* Viewer Area */}
         <div className="flex-grow relative bg-slate-900 group">
             {/* Overlay Superposition Metrics & Quick-Cycle HUD Chip */}
-            {viewMode === 'overlay' && alignmentMetrics && !showDomainControls && (
+            {viewMode === 'overlay' && alignmentMetrics && !activeAnnotationTab && (
                 <div className="absolute top-3 right-3 z-20 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 shadow-xl pointer-events-auto animate-fade-in">
                     <span className="font-bold text-white text-xs">{alignmentMetrics.shortName}</span>
                     <span className="text-slate-600">•</span>
@@ -1001,131 +1417,693 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                     </button>
                 </div>
             )}
-            {/* 3D Domain Overlays Floating Panel */}
-            {showDomainControls && (
-                <div className="absolute top-3 left-3 z-30 w-80 max-h-[85%] bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl flex flex-col p-3 animate-fade-in text-xs">
+            
+            {/* Unified 3D Structural Features & Overlays Floating Panel */}
+            {activeAnnotationTab !== null && (
+                <div className="absolute top-3 left-3 z-30 w-88 max-h-[85%] bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl flex flex-col p-3 animate-fade-in text-xs">
+                    {/* Header */}
                     <div className="flex justify-between items-center pb-2 border-b border-slate-800">
                         <div className="flex items-center gap-1.5">
-                            <Layers className="w-4 h-4 text-indigo-400" />
-                            <h4 className="font-bold text-slate-100 text-xs">3D Protein Domains</h4>
-                            {proteinDomains && proteinDomains.length > 0 && (
-                                <span className="text-[10px] text-slate-400 font-mono">({proteinDomains.length})</span>
-                            )}
+                            <Sparkles className="w-4 h-4 text-emerald-400" />
+                            <h4 className="font-bold text-slate-100 text-xs">3D Structural Overlays</h4>
                         </div>
                         <button 
                             type="button"
-                            onClick={() => setShowDomainControls(false)} 
+                            onClick={() => setActiveAnnotationTab(null)} 
                             className="p-1 rounded-md text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
                         >
                             <X className="w-3.5 h-3.5" />
                         </button>
                     </div>
 
-                    <div className="py-2 text-[11px] text-slate-400 leading-tight">
-                        Overlay individual functional domains on the 3D structure in customizable colors. (Default: all off).
+                    {/* Tab Navigation Bar */}
+                    <div className="flex items-center gap-1 pt-2 pb-2 border-b border-slate-800/80">
+                        <button
+                            type="button"
+                            onClick={() => setActiveAnnotationTab('sites')}
+                            className={`flex-1 py-1 px-1.5 rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                activeAnnotationTab === 'sites'
+                                    ? 'bg-rose-600/30 text-rose-300 border border-rose-500/50'
+                                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+                            }`}
+                        >
+                            <Target className="w-3 h-3 text-rose-400" />
+                            <span>Sites</span>
+                            {enabledSiteIds.size > 0 && (
+                                <span className="px-1 py-0.2 bg-rose-500 text-white rounded-full text-[9px] font-black">
+                                    {enabledSiteIds.size}
+                                </span>
+                            )}
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => setActiveAnnotationTab('ptms')}
+                            className={`flex-1 py-1 px-1.5 rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                activeAnnotationTab === 'ptms'
+                                    ? 'bg-amber-600/30 text-amber-300 border border-amber-500/50'
+                                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+                            }`}
+                        >
+                            <Zap className="w-3 h-3 text-amber-400" />
+                            <span>PTMs</span>
+                            {enabledPtmIds.size > 0 && (
+                                <span className="px-1 py-0.2 bg-amber-500 text-white rounded-full text-[9px] font-black">
+                                    {enabledPtmIds.size}
+                                </span>
+                            )}
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => setActiveAnnotationTab('interfaces')}
+                            className={`flex-1 py-1 px-1.5 rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                activeAnnotationTab === 'interfaces'
+                                    ? 'bg-emerald-600/30 text-emerald-300 border border-emerald-500/50'
+                                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+                            }`}
+                        >
+                            <Users className="w-3 h-3 text-emerald-400" />
+                            <span>Interfaces</span>
+                            {(showAllInterfaces || enabledInterfacePartners.size > 0) && (
+                                <span className="px-1 py-0.2 bg-emerald-500 text-white rounded-full text-[9px] font-black">
+                                    {showAllInterfaces ? 'All' : enabledInterfacePartners.size}
+                                </span>
+                            )}
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={() => setActiveAnnotationTab('domains')}
+                            className={`flex-1 py-1 px-1.5 rounded text-[11px] font-bold flex items-center justify-center gap-1 transition-all ${
+                                activeAnnotationTab === 'domains'
+                                    ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/50'
+                                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/60 border border-transparent'
+                            }`}
+                        >
+                            <Layers className="w-3 h-3 text-indigo-400" />
+                            <span>Domains</span>
+                            {enabledDomainIds.size > 0 && (
+                                <span className="px-1 py-0.2 bg-indigo-500 text-white rounded-full text-[9px] font-black">
+                                    {enabledDomainIds.size}
+                                </span>
+                            )}
+                        </button>
                     </div>
 
-                    {proteinDomains && proteinDomains.length > 0 ? (
-                        <>
-                            {/* Quick Action Toolbar */}
-                            <div className="flex items-center justify-between py-1.5 mb-2 border-b border-slate-800/80">
-                                <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
-                                    Active: <span className="text-indigo-400 font-bold">{enabledDomainIds.size}</span> of {proteinDomains.length}
-                                </span>
-                                <div className="flex items-center gap-1.5">
-                                    <button
-                                        type="button"
-                                        onClick={disableAllDomains}
-                                        disabled={enabledDomainIds.size === 0}
-                                        className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 border border-slate-700 transition-colors"
-                                    >
-                                        All Off
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={enableAllDomains}
-                                        disabled={enabledDomainIds.size === proteinDomains.length}
-                                        className="px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 transition-colors"
-                                    >
-                                        All On
-                                    </button>
-                                </div>
+                    {/* TAB 1: SITES & MOTIFS */}
+                    {activeAnnotationTab === 'sites' && (
+                        <div className="flex flex-col flex-1 overflow-hidden pt-1">
+                            <div className="py-1 text-[11px] text-slate-400 leading-tight">
+                                Highlight catalytic active sites, metal coordination, ligand/cofactor binding, and short linear motifs (SLiMs).
                             </div>
 
-                            {/* Domains List */}
-                            <div className="space-y-1.5 overflow-y-auto max-h-[320px] pr-1">
-                                {proteinDomains.map(d => {
-                                    const isEnabled = enabledDomainIds.has(d.id);
-                                    const currentColor = domainColors[d.id] || d.color || '#6366f1';
-                                    return (
-                                        <div 
-                                            key={d.id} 
-                                            className={`p-2 rounded-lg border transition-all flex items-center justify-between gap-2 ${
-                                                isEnabled 
-                                                    ? 'bg-slate-800/90 border-indigo-500/50 shadow-xs' 
-                                                    : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
-                                            }`}
-                                        >
-                                            <div className="flex items-center gap-2 min-w-0 flex-1">
-                                                {/* Checkbox toggle */}
-                                                <input 
-                                                    type="checkbox"
-                                                    checked={isEnabled}
-                                                    onChange={() => toggleDomain(d.id)}
-                                                    id={`domain-chk-${d.id}`}
-                                                    className="w-3.5 h-3.5 rounded text-indigo-600 bg-slate-800 border-slate-600 focus:ring-0 cursor-pointer shrink-0"
-                                                />
-                                                
-                                                {/* Color picker for this domain */}
-                                                <label 
-                                                    className="relative w-5 h-5 rounded-full cursor-pointer shrink-0 border border-white/20 shadow-xs flex items-center justify-center overflow-hidden" 
-                                                    style={{ backgroundColor: currentColor }}
-                                                    title="Change 3D domain color on the fly"
+                            {functionalSites && functionalSites.length > 0 ? (
+                                <>
+                                    {/* Action Bar */}
+                                    <div className="flex items-center justify-between py-1.5 mb-2 border-b border-slate-800/80 gap-2 flex-wrap">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
+                                                Active: <span className="text-rose-400 font-bold">{enabledSiteIds.size}</span> of {functionalSites.length}
+                                            </span>
+                                            {/* Style representation toggle for sites */}
+                                            <div className="flex items-center bg-slate-800 rounded border border-slate-700 p-0.5" title="Sites 3D representation style">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSiteRepresentation('cartoon')}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                                        siteRepresentation === 'cartoon' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
                                                 >
-                                                    <input 
-                                                        type="color" 
-                                                        value={currentColor} 
-                                                        onChange={e => setCustomDomainColor(d.id, e.target.value)} 
-                                                        className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
-                                                    />
-                                                </label>
-
-                                                {/* Name and Range */}
-                                                <div className="min-w-0 flex-1">
-                                                    <label 
-                                                        htmlFor={`domain-chk-${d.id}`} 
-                                                        className={`block text-[11px] font-semibold truncate cursor-pointer ${
-                                                            isEnabled ? 'text-white' : 'text-slate-400'
-                                                        }`}
-                                                        title={d.name}
-                                                    >
-                                                        {d.name}
-                                                    </label>
-                                                    <div className="flex items-center gap-1.5 text-[9px] text-slate-400 font-mono">
-                                                        <span>{d.start}–{d.end}</span>
-                                                        <span className="text-slate-600">•</span>
-                                                        <span className="text-slate-400">{d.type}</span>
-                                                    </div>
-                                                </div>
+                                                    Cartoon
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSiteRepresentation('stick')}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                                        siteRepresentation === 'stick' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    Stick
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setSiteRepresentation('surface')}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                                        siteRepresentation === 'surface' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    Surface
+                                                </button>
                                             </div>
-
-                                            {/* Focus Button */}
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
                                             <button
                                                 type="button"
-                                                onClick={() => focusDomain(d)}
-                                                className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
-                                                title="Zoom camera directly to this domain in 3D"
+                                                onClick={disableAllSites}
+                                                disabled={enabledSiteIds.size === 0}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 border border-slate-700 transition-colors"
                                             >
-                                                <MousePointer2 className="w-3.5 h-3.5" />
+                                                All Off
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={enableAllSites}
+                                                disabled={enabledSiteIds.size === functionalSites.length}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-rose-600/30 hover:bg-rose-600/50 text-rose-300 border border-rose-500/50 transition-colors"
+                                            >
+                                                All On
                                             </button>
                                         </div>
-                                    );
-                                })}
+                                    </div>
+
+                                    {/* Category Filter Chips */}
+                                    <div className="flex items-center gap-1 flex-wrap pb-2 border-b border-slate-800/60 mb-2">
+                                        {['ALL', 'ACTIVE_SITE', 'METAL_BINDING', 'BINDING_SITE', 'SLIM_MOTIF'].map(cat => {
+                                            const label = cat === 'ALL' ? 'All' : cat === 'ACTIVE_SITE' ? 'Active' : cat === 'METAL_BINDING' ? 'Metal' : cat === 'BINDING_SITE' ? 'Binding' : 'Motifs';
+                                            const isSelected = siteFilterCategory === cat;
+                                            return (
+                                                <button
+                                                    key={cat}
+                                                    type="button"
+                                                    onClick={() => setSiteFilterCategory(cat)}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-all ${
+                                                        isSelected
+                                                            ? 'bg-rose-950 text-rose-300 border border-rose-700 font-bold'
+                                                            : 'bg-slate-800/80 text-slate-400 hover:text-white border border-slate-700'
+                                                    }`}
+                                                >
+                                                    {label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* Sites List */}
+                                    <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
+                                        {functionalSites
+                                            .filter(s => siteFilterCategory === 'ALL' || s.category === siteFilterCategory)
+                                            .map(s => {
+                                                const isEnabled = enabledSiteIds.has(s.id);
+                                                const currentColor = siteColors[s.id] || s.color || '#e11d48';
+                                                return (
+                                                    <div 
+                                                        key={s.id} 
+                                                        className={`p-2 rounded-lg border transition-all flex items-center justify-between gap-2 ${
+                                                            isEnabled 
+                                                                ? 'bg-slate-800/90 border-rose-500/50 shadow-xs' 
+                                                                : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                            <input 
+                                                                type="checkbox"
+                                                                checked={isEnabled}
+                                                                onChange={() => toggleSite(s.id)}
+                                                                id={`site-chk-${s.id}`}
+                                                                className="w-3.5 h-3.5 rounded text-rose-600 bg-slate-800 border-slate-600 focus:ring-0 cursor-pointer shrink-0"
+                                                            />
+                                                            
+                                                            <label 
+                                                                className="relative w-5 h-5 rounded-full cursor-pointer shrink-0 border border-white/20 shadow-xs flex items-center justify-center overflow-hidden" 
+                                                                style={{ backgroundColor: currentColor }}
+                                                                title="Change site highlight color"
+                                                            >
+                                                                <input 
+                                                                    type="color" 
+                                                                    value={currentColor} 
+                                                                    onChange={e => setCustomSiteColor(s.id, e.target.value)} 
+                                                                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                                                                />
+                                                            </label>
+
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                                    <label 
+                                                                        htmlFor={`site-chk-${s.id}`} 
+                                                                        className={`block text-[11px] font-semibold truncate cursor-pointer ${
+                                                                            isEnabled ? 'text-white' : 'text-slate-400'
+                                                                        }`}
+                                                                        title={s.name}
+                                                                    >
+                                                                        {s.name}
+                                                                    </label>
+                                                                    <span className="px-1 py-0.2 rounded text-[9px] font-bold uppercase bg-slate-800 text-rose-300 border border-rose-900/50">
+                                                                        {s.label}
+                                                                    </span>
+                                                                </div>
+                                                                <div className="flex items-center gap-1.5 text-[9px] text-slate-400 font-mono">
+                                                                    <span>Pos: {s.start === s.end ? s.start : `${s.start}–${s.end}`}</span>
+                                                                    {s.description && (
+                                                                        <>
+                                                                            <span className="text-slate-600">•</span>
+                                                                            <span className="truncate max-w-[140px] text-slate-400" title={s.description}>
+                                                                                {s.description}
+                                                                            </span>
+                                                                        </>
+                                                                    )}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Focus Button */}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => focusSite(s)}
+                                                            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
+                                                            title="Zoom camera directly to this site in 3D"
+                                                        >
+                                                            <MousePointer2 className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="py-6 text-center text-slate-500 text-xs">
+                                    No functional sites or motifs annotated for this structure.
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* TAB 2: PTMs */}
+                    {activeAnnotationTab === 'ptms' && (
+                        <div className="flex flex-col flex-1 overflow-hidden pt-1">
+                            <div className="py-1 text-[11px] text-slate-400 leading-tight">
+                                Highlight post-translational modifications (Phosphorylation, Acetylation, Ubiquitination, Methylation, etc.).
                             </div>
-                        </>
-                    ) : (
-                        <div className="py-6 text-center text-slate-500 text-xs">
-                            No protein domains annotated for this structure.
+
+                            {proteinPtms && proteinPtms.length > 0 ? (
+                                <>
+                                    {/* Action Bar */}
+                                    <div className="flex items-center justify-between py-1.5 mb-2 border-b border-slate-800/80">
+                                        <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
+                                            Active: <span className="text-amber-400 font-bold">{enabledPtmIds.size}</span> of {proteinPtms.length}
+                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={disableAllPtms}
+                                                disabled={enabledPtmIds.size === 0}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 border border-slate-700 transition-colors"
+                                            >
+                                                All Off
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={enableAllPtms}
+                                                disabled={enabledPtmIds.size === proteinPtms.length}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-600/30 hover:bg-amber-600/50 text-amber-300 border border-amber-500/50 transition-colors"
+                                            >
+                                                All On
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Category Filter Chips */}
+                                    <div className="flex items-center gap-1 flex-wrap pb-2 border-b border-slate-800/60 mb-2">
+                                        {['ALL', 'Phosphorylation', 'Acetylation', 'Methylation', 'Ubiquitination', 'SUMOylation', 'Glycosylation', 'Disulfide'].map(cat => {
+                                            const label = cat === 'ALL' ? 'All' : cat === 'Phosphorylation' ? 'Phospho' : cat === 'Acetylation' ? 'Acetyl' : cat === 'Methylation' ? 'Methyl' : cat === 'Ubiquitination' ? 'Ubiquitin' : cat === 'SUMOylation' ? 'SUMO' : cat === 'Glycosylation' ? 'Glyco' : 'Disulfide';
+                                            const isSelected = ptmFilterCategory === cat;
+                                            return (
+                                                <button
+                                                    key={cat}
+                                                    type="button"
+                                                    onClick={() => setPtmFilterCategory(cat)}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-all ${
+                                                        isSelected
+                                                            ? 'bg-amber-950 text-amber-300 border border-amber-700 font-bold'
+                                                            : 'bg-slate-800/80 text-slate-400 hover:text-white border border-slate-700'
+                                                    }`}
+                                                >
+                                                    {label}
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+
+                                    {/* PTMs List */}
+                                    <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
+                                        {proteinPtms
+                                            .filter(p => ptmFilterCategory === 'ALL' || p.category === ptmFilterCategory)
+                                            .map(p => {
+                                                const isEnabled = enabledPtmIds.has(p.id);
+                                                const currentColor = ptmColors[p.id] || p.color || '#f59e0b';
+                                                return (
+                                                    <div 
+                                                        key={p.id} 
+                                                        className={`p-2 rounded-lg border transition-all flex items-center justify-between gap-2 ${
+                                                            isEnabled 
+                                                                ? 'bg-slate-800/90 border-amber-500/50 shadow-xs' 
+                                                                : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                                                        }`}
+                                                    >
+                                                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                            <input 
+                                                                type="checkbox"
+                                                                checked={isEnabled}
+                                                                onChange={() => togglePtm(p.id)}
+                                                                id={`ptm-chk-${p.id}`}
+                                                                className="w-3.5 h-3.5 rounded text-amber-600 bg-slate-800 border-slate-600 focus:ring-0 cursor-pointer shrink-0"
+                                                            />
+                                                            
+                                                            <label 
+                                                                className="relative w-5 h-5 rounded-full cursor-pointer shrink-0 border border-white/20 shadow-xs flex items-center justify-center overflow-hidden" 
+                                                                style={{ backgroundColor: currentColor }}
+                                                                title="Change PTM highlight color"
+                                                            >
+                                                                <input 
+                                                                    type="color" 
+                                                                    value={currentColor} 
+                                                                    onChange={e => setCustomPtmColor(p.id, e.target.value)} 
+                                                                    className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                                                                />
+                                                            </label>
+
+                                                            <div className="min-w-0 flex-1">
+                                                                <div className="flex items-center gap-1.5 flex-wrap">
+                                                                    <span className="px-1 py-0.2 rounded text-[9px] font-bold uppercase bg-slate-800 text-amber-300 border border-amber-900/50">
+                                                                        {p.badge}
+                                                                    </span>
+                                                                    <label 
+                                                                        htmlFor={`ptm-chk-${p.id}`} 
+                                                                        className={`block text-[11px] font-semibold truncate cursor-pointer ${
+                                                                            isEnabled ? 'text-white' : 'text-slate-400'
+                                                                        }`}
+                                                                    >
+                                                                        {p.category}
+                                                                    </label>
+                                                                    <span className="text-[10px] font-mono font-bold text-slate-300">
+                                                                        {p.aminoAcid || ''}{p.start}
+                                                                    </span>
+                                                                </div>
+                                                                <div className="text-[9px] text-slate-400 truncate max-w-[200px]" title={p.description}>
+                                                                    {p.description}
+                                                                </div>
+                                                            </div>
+                                                        </div>
+
+                                                        {/* Focus Button */}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => focusPtm(p)}
+                                                            className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
+                                                            title="Zoom camera directly to this PTM residue in 3D"
+                                                        >
+                                                            <MousePointer2 className="w-3.5 h-3.5" />
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="py-6 text-center text-slate-500 text-xs">
+                                    No post-translational modifications annotated for this structure.
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* TAB 3: CONTACT INTERFACES */}
+                    {activeAnnotationTab === 'interfaces' && (
+                        <div className="flex flex-col flex-1 overflow-hidden pt-1">
+                            <div className="py-1 text-[11px] text-slate-400 leading-tight">
+                                Highlight structural contact residues from BioGRID & PDBe-KB interaction networks.
+                            </div>
+
+                            {proteinInterfaces && (proteinInterfaces.interfacePartners.length > 0 || proteinInterfaces.allInterfaceResidueIndices.length > 0) ? (
+                                <>
+                                    {/* Master Highlight All Toggle */}
+                                    <div className="p-2.5 my-1.5 rounded-lg bg-emerald-950/40 border border-emerald-800/60 flex items-center justify-between gap-2">
+                                        <div className="flex items-center gap-2">
+                                            <input 
+                                                type="checkbox"
+                                                id="master-interface-toggle"
+                                                checked={showAllInterfaces}
+                                                onChange={toggleAllInterfaces}
+                                                className="w-4 h-4 rounded text-emerald-600 bg-slate-800 border-slate-600 focus:ring-0 cursor-pointer"
+                                            />
+                                            <label htmlFor="master-interface-toggle" className="font-bold text-white text-[11px] cursor-pointer">
+                                                Highlight All Interface Contacts
+                                            </label>
+                                        </div>
+                                        <span className="text-[10px] font-mono font-bold bg-emerald-900/60 text-emerald-300 px-2 py-0.5 rounded border border-emerald-700/60">
+                                            {proteinInterfaces.allInterfaceResidueIndices.length} Residues
+                                        </span>
+                                    </div>
+
+                                    {/* Action Bar */}
+                                    <div className="flex items-center justify-between py-1.5 mb-2 border-b border-slate-800/80 gap-2 flex-wrap">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
+                                                Partners: <span className="text-emerald-400 font-bold">{enabledInterfacePartners.size}</span> of {proteinInterfaces.interfacePartners.length}
+                                            </span>
+                                            {/* Style representation toggle for interfaces */}
+                                            <div className="flex items-center bg-slate-800 rounded border border-slate-700 p-0.5" title="Interfaces 3D representation style">
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setInterfaceRepresentation('cartoon')}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                                        interfaceRepresentation === 'cartoon' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    Cartoon
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setInterfaceRepresentation('stick')}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                                        interfaceRepresentation === 'stick' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    Stick
+                                                </button>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => setInterfaceRepresentation('surface')}
+                                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold transition-colors ${
+                                                        interfaceRepresentation === 'surface' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'
+                                                    }`}
+                                                >
+                                                    Surface
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={disableAllInterfaces}
+                                                disabled={!showAllInterfaces && enabledInterfacePartners.size === 0}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 border border-slate-700 transition-colors"
+                                            >
+                                                All Off
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={enableAllInterfacePartners}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/50 transition-colors"
+                                            >
+                                                All On
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Interface Partners List */}
+                                    <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
+                                        {proteinInterfaces.interfacePartners.map(p => {
+                                            const isEnabled = showAllInterfaces || enabledInterfacePartners.has(p.partnerSymbol);
+                                            return (
+                                                <div 
+                                                    key={p.partnerSymbol} 
+                                                    className={`p-2 rounded-lg border transition-all flex items-center justify-between gap-2 ${
+                                                        isEnabled 
+                                                            ? 'bg-slate-800/90 border-emerald-500/50 shadow-xs' 
+                                                            : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                        <input 
+                                                            type="checkbox"
+                                                            checked={isEnabled}
+                                                            onChange={() => {
+                                                                if (showAllInterfaces) setShowAllInterfaces(false);
+                                                                toggleInterfacePartner(p.partnerSymbol);
+                                                            }}
+                                                            id={`intf-chk-${p.partnerSymbol}`}
+                                                            className="w-3.5 h-3.5 rounded text-emerald-600 bg-slate-800 border-slate-600 focus:ring-0 cursor-pointer shrink-0"
+                                                        />
+                                                        
+                                                        <div className="min-w-0 flex-1">
+                                                            <div className="flex items-center gap-1.5 flex-wrap">
+                                                                <label 
+                                                                    htmlFor={`intf-chk-${p.partnerSymbol}`} 
+                                                                    className={`block text-[11px] font-semibold truncate cursor-pointer ${
+                                                                        isEnabled ? 'text-white' : 'text-slate-400'
+                                                                    }`}
+                                                                >
+                                                                    {p.partnerSymbol}
+                                                                </label>
+                                                                {p.isHomomer && (
+                                                                    <span className="px-1 py-0.2 rounded text-[9px] font-bold uppercase bg-slate-800 text-purple-300 border border-purple-900/50">
+                                                                        Homomer
+                                                                    </span>
+                                                                )}
+                                                                {p.isNucleicAcid && (
+                                                                    <span className="px-1 py-0.2 rounded text-[9px] font-bold uppercase bg-slate-800 text-cyan-300 border border-cyan-900/50">
+                                                                        DNA/RNA
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <div className="flex items-center gap-1.5 text-[9px] text-slate-400 font-mono">
+                                                                <span className="text-emerald-400 font-bold">{p.residueCount} Residues</span>
+                                                                {p.pdbIds?.length > 0 && (
+                                                                    <>
+                                                                        <span className="text-slate-600">•</span>
+                                                                        <span>{p.pdbIds.length} PDBs</span>
+                                                                    </>
+                                                                )}
+                                                                {p.bioGridCount > 0 && (
+                                                                    <>
+                                                                        <span className="text-slate-600">•</span>
+                                                                        <span>{p.bioGridCount} BioGRID Evidences</span>
+                                                                    </>
+                                                                )}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Focus Button */}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => focusInterfaceResidues(p.residues, p.partnerSymbol)}
+                                                        className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
+                                                        title="Zoom camera directly to this interface patch in 3D"
+                                                    >
+                                                        <MousePointer2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="py-6 text-center text-slate-500 text-xs">
+                                    No structural interface contacts annotated for this structure.
+                                </div>
+                            )}
+                        </div>
+                    )}
+
+                    {/* TAB 4: DOMAINS */}
+                    {activeAnnotationTab === 'domains' && (
+                        <div className="flex flex-col flex-1 overflow-hidden pt-1">
+                            <div className="py-1 text-[11px] text-slate-400 leading-tight">
+                                Overlay individual functional domains on the 3D structure in customizable colors.
+                            </div>
+
+                            {proteinDomains && proteinDomains.length > 0 ? (
+                                <>
+                                    {/* Quick Action Toolbar */}
+                                    <div className="flex items-center justify-between py-1.5 mb-2 border-b border-slate-800/80">
+                                        <span className="text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
+                                            Active: <span className="text-indigo-400 font-bold">{enabledDomainIds.size}</span> of {proteinDomains.length}
+                                        </span>
+                                        <div className="flex items-center gap-1.5">
+                                            <button
+                                                type="button"
+                                                onClick={disableAllDomains}
+                                                disabled={enabledDomainIds.size === 0}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-slate-300 border border-slate-700 transition-colors"
+                                            >
+                                                All Off
+                                            </button>
+                                            <button
+                                                type="button"
+                                                onClick={enableAllDomains}
+                                                disabled={enabledDomainIds.size === proteinDomains.length}
+                                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-600/30 hover:bg-indigo-600/50 text-indigo-300 border border-indigo-500/50 transition-colors"
+                                            >
+                                                All On
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    {/* Domains List */}
+                                    <div className="space-y-1.5 overflow-y-auto max-h-[300px] pr-1">
+                                        {proteinDomains.map(d => {
+                                            const isEnabled = enabledDomainIds.has(d.id);
+                                            const currentColor = domainColors[d.id] || d.color || '#6366f1';
+                                            return (
+                                                <div 
+                                                    key={d.id} 
+                                                    className={`p-2 rounded-lg border transition-all flex items-center justify-between gap-2 ${
+                                                        isEnabled 
+                                                            ? 'bg-slate-800/90 border-indigo-500/50 shadow-xs' 
+                                                            : 'bg-slate-900/60 border-slate-800 hover:border-slate-700'
+                                                    }`}
+                                                >
+                                                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                                                        <input 
+                                                            type="checkbox"
+                                                            checked={isEnabled}
+                                                            onChange={() => toggleDomain(d.id)}
+                                                            id={`domain-chk-${d.id}`}
+                                                            className="w-3.5 h-3.5 rounded text-indigo-600 bg-slate-800 border-slate-600 focus:ring-0 cursor-pointer shrink-0"
+                                                        />
+                                                        
+                                                        <label 
+                                                            className="relative w-5 h-5 rounded-full cursor-pointer shrink-0 border border-white/20 shadow-xs flex items-center justify-center overflow-hidden" 
+                                                            style={{ backgroundColor: currentColor }}
+                                                            title="Change 3D domain color on the fly"
+                                                        >
+                                                            <input 
+                                                                type="color" 
+                                                                value={currentColor} 
+                                                                onChange={e => setCustomDomainColor(d.id, e.target.value)} 
+                                                                className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+                                                            />
+                                                        </label>
+
+                                                        <div className="min-w-0 flex-1">
+                                                            <label 
+                                                                htmlFor={`domain-chk-${d.id}`} 
+                                                                className={`block text-[11px] font-semibold truncate cursor-pointer ${
+                                                                    isEnabled ? 'text-white' : 'text-slate-400'
+                                                                }`}
+                                                                title={d.name}
+                                                            >
+                                                                {d.name}
+                                                            </label>
+                                                            <div className="flex items-center gap-1.5 text-[9px] text-slate-400 font-mono">
+                                                                <span>{d.start}–{d.end}</span>
+                                                                <span className="text-slate-600">•</span>
+                                                                <span className="text-slate-400">{d.type}</span>
+                                                            </div>
+                                                        </div>
+                                                    </div>
+
+                                                    {/* Focus Button */}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => focusDomain(d)}
+                                                        className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-700 transition-colors shrink-0"
+                                                        title="Zoom camera directly to this domain in 3D"
+                                                    >
+                                                        <MousePointer2 className="w-3.5 h-3.5" />
+                                                    </button>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                </>
+                            ) : (
+                                <div className="py-6 text-center text-slate-500 text-xs">
+                                    No protein domains annotated for this structure.
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
@@ -1266,7 +2244,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                 {/* View Style Options */}
                 <div className="flex flex-col gap-2">
                     <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-400 uppercase tracking-wider text-[10px] w-20">Base Style</span>
+                        <span className="font-bold text-slate-400 uppercase tracking-wider text-[10px] w-24">Base Style</span>
                         <div className="flex bg-slate-800 rounded border border-slate-600 p-0.5">
                             <button onClick={() => setRepresentation('cartoon')} className={`px-2 py-1 rounded ${representation === 'cartoon' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Cartoon</button>
                             <button onClick={() => setRepresentation('stick')} className={`px-2 py-1 rounded ${representation === 'stick' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Stick</button>
@@ -1274,12 +2252,32 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                         </div>
                     </div>
                     <div className="flex items-center gap-2">
-                        <span className="font-bold text-slate-400 uppercase tracking-wider text-[10px] w-20">Variant Style</span>
+                        <span className="font-bold text-slate-400 uppercase tracking-wider text-[10px] w-24">Variant Style</span>
                         <div className="flex bg-slate-800 rounded border border-slate-600 p-0.5">
                             <button onClick={() => setVariantRepresentation('cartoon')} className={`px-2 py-1 rounded ${variantRepresentation === 'cartoon' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Cartoon</button>
                             <button onClick={() => setVariantRepresentation('stick')} className={`px-2 py-1 rounded ${variantRepresentation === 'stick' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Stick</button>
                             <button onClick={() => setVariantRepresentation('sphere')} className={`px-2 py-1 rounded ${variantRepresentation === 'sphere' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Sphere</button>
                             <button onClick={() => setVariantRepresentation('surface')} className={`px-2 py-1 rounded ${variantRepresentation === 'surface' ? 'bg-slate-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Surface</button>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className="font-bold text-rose-400 uppercase tracking-wider text-[10px] w-24 flex items-center gap-1">
+                            <Target className="w-3 h-3 text-rose-400" /> Sites
+                        </span>
+                        <div className="flex bg-slate-800 rounded border border-slate-600 p-0.5">
+                            <button onClick={() => setSiteRepresentation('cartoon')} className={`px-2 py-1 rounded ${siteRepresentation === 'cartoon' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Cartoon</button>
+                            <button onClick={() => setSiteRepresentation('stick')} className={`px-2 py-1 rounded ${siteRepresentation === 'stick' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Stick</button>
+                            <button onClick={() => setSiteRepresentation('surface')} className={`px-2 py-1 rounded ${siteRepresentation === 'surface' ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Surface</button>
+                        </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <span className="font-bold text-emerald-400 uppercase tracking-wider text-[10px] w-24 flex items-center gap-1">
+                            <Users className="w-3 h-3 text-emerald-400" /> Interfaces
+                        </span>
+                        <div className="flex bg-slate-800 rounded border border-slate-600 p-0.5">
+                            <button onClick={() => setInterfaceRepresentation('cartoon')} className={`px-2 py-1 rounded ${interfaceRepresentation === 'cartoon' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Cartoon</button>
+                            <button onClick={() => setInterfaceRepresentation('stick')} className={`px-2 py-1 rounded ${interfaceRepresentation === 'stick' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Stick</button>
+                            <button onClick={() => setInterfaceRepresentation('surface')} className={`px-2 py-1 rounded ${interfaceRepresentation === 'surface' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-slate-300'}`}>Surface</button>
                         </div>
                     </div>
                 </div>
