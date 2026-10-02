@@ -1,0 +1,6 @@
+{
+  "name": "BUDDY",
+  "description": "A bioinformatics pipeline for mapping human genes to yeast orthologs, analyzing conservation of variants, and generating experimental plans using Gemini.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
