@@ -1,7 +1,7 @@
 # BUDDY 🧬
 ### Bioinformatic Utility for Diagnostic Discovery in Yeast
 
-**BUDDY** is an advanced, production-grade bioinformatics platform designed to bridge human medical genetics and yeast (*Saccharomyces cerevisiae*) model organism research. It streamlines the functional characterization of human **Variants of Uncertain Significance (VUS)** and **ClinVar ⇄ AlphaMissense discordant variants** by mapping them to yeast orthologs, overlaying 3D structural conservation, mapping biological functional sites, designing CRISPR editing strategies, and synthesizing AI-assisted experimental protocols.
+**BUDDY** is an advanced, production-grade bioinformatics platform designed to bridge human medical genetics and yeast (*Saccharomyces cerevisiae*) model organism research. It streamlines the functional characterization of human **Variants of Uncertain Significance (VUS)** including **ClinVar ⇄ AlphaMissense discordant variants** by mapping them to yeast orthologs, overlaying 3D structural conservation, mapping biological functional sites, designing CRISPR editing strategies, and synthesizing AI-assisted experimental protocols.
 
 ![React](https://img.shields.io/badge/built%20with-React-61DAFB.svg)
 ![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?logo=typescript&logoColor=white)
