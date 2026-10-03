@@ -64,7 +64,7 @@ A dedicated engine to investigate conflicting signals between machine-learning p
   * **Benign in ClinVar, Pathogenic in AlphaMissense:** Highlights variants that computational models predict as deleterious despite benign clinical classifications (useful for identifying low-penetrance alleles, cell-type specific defects, or clinical misclassifications).
   * **Pathogenic in ClinVar, Benign in AlphaMissense:** Identifies variants classified clinically as pathogenic but predicted benign by structural models (useful for identifying regulatory changes, protein-protein interaction disruptions, or gain-of-function phenotypes).
   * **Recurrent Benign Variants:** High-confidence benign controls with multiple independent submissions.
-* **Refined Filtering:** Filter by minimum ClinVar stars (1★ to 4★), minimum submission counts, DIOPT orthology score, and gnomAD frequency tiers (Common ≥1%, Low-Frequency 0.1%–1%, Rare <0.1%, Ultra-Rare / Absent).
+* **Refined Filtering:** Filter by minimum ClinVar stars (1 to 4), minimum submission counts, DIOPT orthology score, and gnomAD frequency tiers (Common ≥1%, Low-Frequency 0.1%–1%, Rare <0.1%, Ultra-Rare / Absent).
 * **Actions:** One-click CSV export and seamless transfer directly into the BUDDY experimental pipeline.
 
 ---
@@ -80,7 +80,7 @@ A dedicated engine to investigate conflicting signals between machine-learning p
 BUDDY automates the design of CRISPR/Cas9 guides, repair templates, and verification primers for precise genome engineering in yeast:
 
 * **Dual Cloning & Delivery Systems:**
-  * **pML104 Vector Cloning:** Generates forward and reverse oligos with cohesive 5' `gatc` and 3' `gttttagagctag` overhangs for BsmBI-mediated insertion into pML104 (or similar vectors) per Laughery et al. DOI:10.1002/yea.3098.
+  * **pML104 Vector Cloning:** Generates forward and reverse oligos with cohesive 5' `gatc` and 3' `gttttagagctag` overhangs for BsmBI-mediated insertion into pML104 (or similar vectors available on Addgene) per Laughery et al. DOI:10.1002/yea.3098.
   * **NoClo (Cloning-Free In Vivo Homology):**
     * Eliminates in vitro cloning steps by relying on in vivo homologous recombination.
     * **Homology Length Control:** Configurable homology length slider (20 bp to 100 bp per end; default 100 bp) flanking the 20 bp sgRNA sequence for NoClo HDR repair w/pBBK10 linear fragments.
@@ -93,7 +93,7 @@ BUDDY automates the design of CRISPR/Cas9 guides, repair templates, and verifica
   3. **RNApr region (155 bp):**
      `ACTCTCGGTAGCCAAGTTGGTTTAAGGCGCAAGACTGTAATTTATCACTACGAAATCTTGAGATCGGGCGTTCGACTCGCCCCCGGGAGAgatggccggcatggtcccagcctcctcgctggcgccggctgggcaacaccttcgggtggcgaatg`
   4. **sgRNA Target Sequence (20 nt):**
-     High-efficiency gRNA spacer targeting the cut site.
+     High-efficiency custom gRNA spacer targeting the cut site.
   5. **3' sgRNA scaffold / homology to pBBK10 split marker (102 bp):**
      `gttttagagctagaaatagcaagttaaaataaggctagtccgttatcaacttgaaaaagtggcaccgagtcggtgctttttttattttttgtcactattg`
 * **Intelligent PAM & Seed Disruption:**
@@ -176,19 +176,19 @@ BUDDY automates the design of CRISPR/Cas9 guides, repair templates, and verifica
 Click the **Settings (gear icon)** in the navigation bar to customize pipeline parameters:
 
 * **CRISPR & Oligo Design:**
-  * **Cloning Strategy:** `pML104` (plasmid cloning) or `NoClo` (in vivo gap repair).
-  * **NoClo Homology Length:** Configurable from 20 bp to 100 bp flanking the sgRNA sequence (Default: 100 bp).
-  * **NoClo Integrated Repair Template:** Opt-in checkbox to synthesize the complete All-in-One single sequence carrying the 5' homology, 100nt repair donor, 155bp tRNA/ribozyme linker, sgRNA, and 3' terminator.
+  * **Cloning Strategy:** `pML104` (and similar plasmid cloning, Laughery et al. Yeast 2015) or `NoClo` (in vivo gap repair using pBBK10 derivered linear DNA fragments).
+  * **NoClo Homology Length:** 100 bp flanking the sgRNA sequence (Default: 100 bp).
+  * **NoClo Integrated Repair Template:** Checkbox to synthesize the complete All-in-One single sequence also carrying genomic repair template (contains 5' vector homology, 100nt repair donor, 155bp tRNA/ribozyme linker, sgRNA, and 3' split marker fragment homology).
   * **PAM Constraints:** `NGG` (SpCas9), `NNGRRT` (SaCas9), `TTTV` (Cas12a/Cpf1), or `NG` (SpG).
   * **Disruption Priority:** PAM site only, seed region only, or both.
   * **Repair Template:** Symmetric or asymmetric arm length (upstream/downstream skew).
-  * **Primer Design:** Minimum/maximum Tm, primer product length, and GC clamp enforcement.
+  * **PCR Primer Design:** Minimum/maximum Tm, primer product length, and GC clamp enforcement for Amplicon (or Sanger) sequencing of region near desired edit.
 * **Pairwise Alignment:**
   * **Scoring Matrices:** BLOSUM62, BLOSUM45, PAM250.
   * **Penalties:** Configurable gap open and gap extend values.
   * **Algorithm:** Global (Needleman-Wunsch) or Local (Smith-Waterman).
 * **Variant Filtering:**
-  * Minimum ClinVar stars (0 to 4★).
+  * Minimum ClinVar stars (0 to 4 star).
   * Clinical significance classification filters.
   * AlphaMissense pathogenicity score cutoffs.
   * Minimum local homology thresholds.
@@ -199,7 +199,7 @@ Click the **Settings (gear icon)** in the navigation bar to customize pipeline p
 
 * **For Research Use Only:** BUDDY is an academic and research utility. The experiments are not intended for direct clinical diagnostics or treatment decisions without meeting the appropriate ClinGen criteria and independent experimental validation.
 * **Laboratory Safety:** Oversight should be provided by an experienced lab professional and verify that all experiments are performed in accordance with federal, state, and institutional biosafety guidelines.
-
+* **AI Use disclosure - Multimodal AI (google gemini pro) is used within BUDDY, was used to aid in coding BUDDY, and was used to generate documentation (e.g., this readme) for BUDDY. 
 ---
 
 ## 📄 License
