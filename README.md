@@ -10,7 +10,7 @@
 
 ---
 
-## 🌟 Key Features & Workflows
+##  Key Features & Workflows
 
 ### 1. Orthology & Evolutionary Conservation
 * **DIOPT Integration:** Automated mapping of Human genes to Yeast orthologs (and vice-versa) powered by DRSC DIOPT scores (integrating Ensembl Compara, Homologene, Inparanoid, OMA, OrthoFinder, OrthoMCL, PANTHER, PhylomeDB, and TreeFam).
@@ -71,7 +71,7 @@ A dedicated engine to investigate conflicting signals between machine-learning p
 
 ### 5. 3D Molecular Structure Visualization
 * Powered by **3Dmol.js** with AlphaFold and RCSB PDB structures.
-* Highlights mutated residues, functional domains, and interface boundaries.
+* Highlights variant residues, functional domains, and interface boundaries.
 * Dual-structure view with superposition for comparing human and yeast conformations.
 
 ---
@@ -80,21 +80,21 @@ A dedicated engine to investigate conflicting signals between machine-learning p
 BUDDY automates the design of CRISPR/Cas9 guides, repair templates, and verification primers for precise genome engineering in yeast:
 
 * **Dual Cloning & Delivery Systems:**
-  * **pML104 Vector Cloning:** Generates forward and reverse oligos with cohesive 5' `gatc` and 3' `gttttagagctag` overhangs for BsmBI-mediated insertion into pML104 (or similar vectors).
+  * **pML104 Vector Cloning:** Generates forward and reverse oligos with cohesive 5' `gatc` and 3' `gttttagagctag` overhangs for BsmBI-mediated insertion into pML104 (or similar vectors) per Laughery et al. DOI:10.1002/yea.3098.
   * **NoClo (Cloning-Free In Vivo Homology):**
     * Eliminates in vitro cloning steps by relying on in vivo homologous recombination.
-    * **Homology Length Control:** Configurable homology length slider (20 bp to 100 bp per end; default 100 bp) flanking the 20 bp sgRNA sequence for gap repair.
-    * **All-in-One Integrated Repair Template Option:** Users can check **"Integrate Repair Template onto Same Sequence"** to synthesize a single, contiguous ~478 nt oligo carrying both the repair donor and the sgRNA expression cassette.
+    * **Homology Length Control:** Configurable homology length slider (20 bp to 100 bp per end; default 100 bp) flanking the 20 bp sgRNA sequence for NoClo HDR repair w/pBBK10 linear fragments.
+    * **All-in-One Integrated Repair Template Option:** Users can check **"Integrate Repair Template onto Same Sequence"** to synthesize a single, contiguous ~478 nt oligo carrying both the repair donor and the sgRNA expression cassette to be ordered as a 'gBlock' style synthetic dsDNA.
 * **Architecture of NoClo All-in-One Integrated Oligo (5' → 3'):**
-  1. **5' Upstream Homology Arm (101 bp):**
+  1. **5' Upstream Homology Arm (101 bp) to pBBK10 vector:**
      `tgcctgtatatatatatacatgagaagaacggcatagtgcgtgtttatgcttaaatgcgtatatgtgttatgtagtatactctttcttcaacaattaaat`
   2. **100 nt Repair Donor Template:**
      Contains the intended missense mutation (or deletion control) flanked by symmetric/asymmetric homology arms.
-  3. **tRNA/Ribozyme Self-Cleaving Linker (155 bp):**
+  3. **RNApr region (155 bp):**
      `ACTCTCGGTAGCCAAGTTGGTTTAAGGCGCAAGACTGTAATTTATCACTACGAAATCTTGAGATCGGGCGTTCGACTCGCCCCCGGGAGAgatggccggcatggtcccagcctcctcgctggcgccggctgggcaacaccttcgggtggcgaatg`
   4. **sgRNA Target Sequence (20 nt):**
      High-efficiency gRNA spacer targeting the cut site.
-  5. **3' sgRNA Scaffold & Terminator (102 bp):**
+  5. **3' sgRNA scaffold / homology to pBBK10 split marker (102 bp):**
      `gttttagagctagaaatagcaagttaaaataaggctagtccgttatcaacttgaaaaagtggcaccgagtcggtgctttttttattttttgtcactattg`
 * **Intelligent PAM & Seed Disruption:**
   * Automatically scans for synonymous codons within the cut window to ablate the PAM (`NGG` / `NNGRRT` / `TTTV` / `NG`) or mutate seed residues, preventing Cas9 re-cleavage of the repaired allele.
@@ -112,7 +112,7 @@ BUDDY automates the design of CRISPR/Cas9 guides, repair templates, and verifica
 
 ---
 
-## 🚀 Getting Started
+##  Getting Started
 
 ### Prerequisites
 * **Node.js** (v18 or higher recommended)
@@ -197,11 +197,11 @@ Click the **Settings (gear icon)** in the navigation bar to customize pipeline p
 
 ## ⚠️ Disclaimers
 
-* **For Research Use Only:** BUDDY is an academic and research utility. Experimental plans, guide designs, and predictive scores are generated algorithmically and with generative models. They are not intended for direct clinical diagnostics or treatment decisions without independent experimental validation.
-* **Laboratory Safety:** Always verify guide RNAs, oligos, and growth assay conditions including using primary literature. Verify all experiments are performed in accordance with federal, state, and institutional biosafety guidelines.
+* **For Research Use Only:** BUDDY is an academic and research utility. The experiments are not intended for direct clinical diagnostics or treatment decisions without meeting the appropriate ClinGen criteria and independent experimental validation.
+* **Laboratory Safety:** Oversight should be provided by an experienced lab professional and verify that all experiments are performed in accordance with federal, state, and institutional biosafety guidelines.
 
 ---
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the GNU AFFERO GENERAL PUBLIC LICENSE - see the [LICENSE](LICENSE) file for details.
