@@ -32,16 +32,16 @@ export interface AlignmentMetrics {
 
 export const OVERLAY_ALGORITHMS: { type: OverlayAlgorithmType; name: string; shortName: string; description: string }[] = [
   {
+    type: 'pruned_core',
+    name: 'Pruned Core (Outlier Rejection - Default)',
+    shortName: 'Pruned Core',
+    description: 'Iteratively filters out flexible loops, disordered tails, and divergent insertions to lock onto the rigid structural core.'
+  },
+  {
     type: 'kabsch_global',
     name: 'Global Kabsch (Full-Length)',
     shortName: 'Global Kabsch',
     description: 'Standard least-squares alignment minimizing global RMSD across all matched residue pairs.'
-  },
-  {
-    type: 'pruned_core',
-    name: 'Pruned Core (Outlier Rejection)',
-    shortName: 'Pruned Core',
-    description: 'Iteratively filters out flexible loops, disordered tails, and divergent insertions to lock onto the rigid structural core.'
   },
   {
     type: 'conserved_anchors',

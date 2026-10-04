@@ -364,14 +364,13 @@ export function findCas9Sites(
   let match;
   while ((match = forwardRegex.exec(region)) !== null) {
     const siteStart = start + match.index;
-    // Score context: -4 to +30 relative to start?
-    // Note: Doench score expects 30bp context for 20bp+NGG.
-    // We only calculate score for standard NGG 20bp currently.
+    // Score context: 4bp upstream flanking + 20bp guide spacer + 3bp NGG PAM + 3bp downstream flanking = 30bp
+    // Note: Doench 2014 Rule Set 1 expects 30bp context for 20bp+NGG SpCas9 guides.
     let context30 = "";
     if (guideLen === 20 && pamType === 'NGG') {
-        const contextStart = match.index - 4;
-        if (contextStart >= 0 && contextStart + 30 <= region.length) {
-            context30 = region.substring(contextStart, contextStart + 30);
+        // Extract 30bp context from full geneSequence using absolute coordinates: [siteStart - 4, siteStart + 26)
+        if (siteStart - 4 >= 0 && siteStart + 26 <= geneSequence.length) {
+            context30 = geneSequence.substring(siteStart - 4, siteStart + 26);
         }
     }
 
@@ -379,7 +378,7 @@ export function findCas9Sites(
       position: siteStart,
       sequence: match[1],
       strand: 'forward',
-      context30
+      context30: context30 || undefined
     });
     forwardRegex.lastIndex = match.index + 1;
   }
@@ -387,10 +386,26 @@ export function findCas9Sites(
   // Reverse Scan
   while ((match = reverseRegex.exec(region)) !== null) {
     const siteStart = start + match.index;
+    // Reverse strand context (5' -> 3' on target strand):
+    // On the forward genomic strand, reverseRegex matches CCN + 20nt spacer (revComp).
+    // The target strand 30-mer (5'->3') consists of:
+    // 4bp upstream of guide (revComp of forward genomic bases siteStart + 23..27)
+    // + 20bp guide spacer (revComp of forward genomic bases siteStart + 3..23)
+    // + 3bp NGG PAM (revComp of forward genomic bases siteStart..siteStart + 3)
+    // + 3bp downstream of PAM (revComp of forward genomic bases siteStart - 3..siteStart)
+    // Reverse-complementing the 30bp genomic slice [siteStart - 3, siteStart + 27) gives the exact 30-mer context.
+    let context30 = "";
+    if (guideLen === 20 && pamType === 'NGG') {
+        if (siteStart - 3 >= 0 && siteStart + 27 <= geneSequence.length) {
+            context30 = reverseComplement(geneSequence.substring(siteStart - 3, siteStart + 27));
+        }
+    }
+
     sites.push({
       position: siteStart,
       sequence: match[1],
-      strand: 'reverse'
+      strand: 'reverse',
+      context30: context30 || undefined
     });
     reverseRegex.lastIndex = match.index + 1;
   }

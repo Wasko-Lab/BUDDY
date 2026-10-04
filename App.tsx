@@ -356,7 +356,7 @@ const DEFAULT_SETTINGS: AdvancedSettings = {
     structure: {
         defaultRepresentation: 'cartoon',
         colorScheme: 'chain',
-        superpositionMethod: 'sequence'
+        superpositionMethod: 'pruned_core'
     }
 };
 
@@ -943,7 +943,10 @@ export const App: React.FC = () => {
       let orth: OrthologInfo | null = null;
       let yeastOnlyMode = false;
 
-      if (manualSearchSpecies === 'dual' && !identifier) {
+      // Determine if this is an external direct human gene run (e.g. from topic search or discordant deep-dive)
+      const isExternalCall = !!identifier && inputMode !== 'manual';
+
+      if (manualSearchSpecies === 'dual' && !isExternalCall) {
            // Dual Input Mode (Manual Human + Manual Yeast)
            if (!trimmedDualYeastInput) {
                throw new Error("Please enter both Human and Yeast gene symbols for Dual Input mode.");
@@ -957,8 +960,12 @@ export const App: React.FC = () => {
 
            // 2. Fetch Yeast Info
            const yeastHits = await searchGenes(trimmedDualYeastInput, 'yeast');
-           if (yeastHits.length === 0) throw new Error(`Yeast gene '${trimmedDualYeastInput}' not found.`);
-           const bestYeast = yeastHits[0];
+           if (yeastHits.length === 0) throw new Error(`Yeast gene '${trimmedDualYeastInput}' not found in MyGene.info or YeastMine.`);
+           const upperDual = trimmedDualYeastInput.toUpperCase();
+           const bestYeast = yeastHits.find((h: any) => 
+               h.symbol?.toUpperCase() === upperDual || 
+               h.locus_tag?.toUpperCase() === upperDual
+           ) || yeastHits[0];
 
            // 3. Construct Ortholog Object manually (Skipping DIOPT)
            orth = {
@@ -969,13 +976,18 @@ export const App: React.FC = () => {
            addLog(`Identified Yeast Gene: ${orth.symbol} (ID: ${orth.id})`);
            addLog(`> Orthology search skipped. Using manual pair: ${gInfo.symbol} <-> ${orth.symbol}`);
 
-      } else if (manualSearchSpecies === 'yeast' && !identifier) {
+      } else if (manualSearchSpecies === 'yeast' && !isExternalCall) {
           // Manual Entry mode set to Yeast
           addLog(`Searching for Yeast gene: ${inputTerm}...`);
           const yeastHits = await searchGenes(inputTerm, 'yeast');
-          if (yeastHits.length === 0) throw new Error(`Yeast gene '${inputTerm}' not found.`);
+          if (yeastHits.length === 0) throw new Error(`Yeast gene '${inputTerm}' not found in MyGene.info or YeastMine.`);
           
-          const bestYeast = yeastHits[0];
+          const upperInput = inputTerm.toUpperCase();
+          const bestYeast = yeastHits.find((h: any) => 
+              h.symbol?.toUpperCase() === upperInput || 
+              h.locus_tag?.toUpperCase() === upperInput
+          ) || yeastHits[0];
+
           addLog(`Found Yeast Gene: ${bestYeast.symbol} (ID: ${bestYeast.entrez_id})`);
           
           addLog(`Finding Human ortholog for ${bestYeast.symbol}...`);
@@ -983,17 +995,16 @@ export const App: React.FC = () => {
           const humanOrth = await getOrtholog(bestYeast.entrez_id, '4932', '9606', bestYeast.symbol);
           
           if (humanOrth) {
-              addLog(`Mapped to Human Gene: ${humanOrth.symbol}`);
+              addLog(`Mapped to Human Gene: ${humanOrth.symbol} (DIOPT Score: ${humanOrth.score})`);
               // Now fetch official Human Gene Info
               gInfo = await getHumanGeneInfo(humanOrth.symbol);
               
-              // Manually construct the Ortholog Info from the yeast data we started with
-              // We call getOrtholog just to verify the link back, passing symbol for fallback safety
               const confirmOrth = await getOrtholog(gInfo.entrez_id, '9606', '4932', gInfo.symbol);
-              orth = confirmOrth || {
+              orth = {
                   id: bestYeast.entrez_id,
                   symbol: bestYeast.symbol,
-                  score: humanOrth.score
+                  score: (confirmOrth && confirmOrth.symbol.toUpperCase() === bestYeast.symbol.toUpperCase()) ? confirmOrth.score : humanOrth.score,
+                  tiedSymbols: confirmOrth?.tiedSymbols
               };
           } else {
               // No Human Ortholog found
@@ -1028,23 +1039,77 @@ export const App: React.FC = () => {
                       score: 0
                   };
               } else {
-                  throw new Error("No Human ortholog found for this Yeast gene. Enable 'Manual Mutation Entry' to proceed with Yeast-only analysis.");
+                  throw new Error(`No Human ortholog found for Yeast gene '${bestYeast.symbol}'. Enable 'Manual Mutation Entry' to proceed with Yeast-only analysis.`);
               }
           }
 
       } else {
-          // Default Human Mode (or direct identifier passed)
+          // Default Human Mode (or external direct identifier passed)
           addLog(`Searching for human gene: ${inputTerm}...`);
-          gInfo = await getHumanGeneInfo(inputTerm);
-          
-          // Sync UI if we used a direct identifier
-          if (identifier) setGeneInput(gInfo.symbol);
-          
-          addLog(`Found: ${gInfo.symbol} (ID: ${gInfo.entrez_id}) (UniProt: ${gInfo.uniprot_id || 'N/A'})`);
-          
-          addLog(`Searching DIOPT for ortholog (ID: ${gInfo.entrez_id})...`);
-          // Pass symbol for fallback
-          orth = await getOrtholog(gInfo.entrez_id, '9606', '4932', gInfo.symbol);
+          try {
+              gInfo = await getHumanGeneInfo(inputTerm);
+              
+              // Sync UI if we used a direct identifier
+              if (identifier) setGeneInput(gInfo.symbol);
+              
+              addLog(`Found: ${gInfo.symbol} (ID: ${gInfo.entrez_id}) (UniProt: ${gInfo.uniprot_id || 'N/A'})`);
+              
+              addLog(`Searching DIOPT for ortholog (ID: ${gInfo.entrez_id})...`);
+              // Pass symbol for fallback
+              orth = await getOrtholog(gInfo.entrez_id, '9606', '4932', gInfo.symbol);
+          } catch (humanErr: any) {
+              // If not found in human database, check if user provided a Yeast gene or ORF!
+              addLog(`Human gene '${inputTerm}' not found in MyGene.info. Checking if '${inputTerm}' is a Yeast gene or ORF...`);
+              const yeastHits = await searchGenes(inputTerm, 'yeast');
+              const upperInput = inputTerm.toUpperCase();
+              const bestYeast = yeastHits.find((h: any) => 
+                  h.symbol?.toUpperCase() === upperInput || 
+                  h.locus_tag?.toUpperCase() === upperInput
+              ) || (yeastHits.length > 0 ? yeastHits[0] : null);
+
+              if (bestYeast) {
+                  addLog(`Identified '${inputTerm}' as Yeast Gene: ${bestYeast.symbol} (ID: ${bestYeast.entrez_id}). Auto-switching to Yeast -> Human ortholog mapping...`);
+                  setManualSearchSpecies('yeast');
+                  setManualNumberingSpecies('yeast');
+                  setGeneInput(bestYeast.symbol);
+
+                  addLog(`Finding Human ortholog for ${bestYeast.symbol}...`);
+                  const humanOrth = await getOrtholog(bestYeast.entrez_id, '4932', '9606', bestYeast.symbol);
+
+                  if (humanOrth) {
+                      addLog(`Mapped to Human Gene: ${humanOrth.symbol} (DIOPT Score: ${humanOrth.score})`);
+                      gInfo = await getHumanGeneInfo(humanOrth.symbol);
+                      const confirmOrth = await getOrtholog(gInfo.entrez_id, '9606', '4932', gInfo.symbol);
+                      orth = {
+                          id: bestYeast.entrez_id,
+                          symbol: bestYeast.symbol,
+                          score: (confirmOrth && confirmOrth.symbol.toUpperCase() === bestYeast.symbol.toUpperCase()) ? confirmOrth.score : humanOrth.score,
+                          tiedSymbols: confirmOrth?.tiedSymbols
+                      };
+                  } else {
+                      if (manualVariantEnabled) {
+                          yeastOnlyMode = true;
+                          addLog("No Human ortholog found. Proceeding in Yeast-Only mode for manual variant analysis.");
+                          gInfo = {
+                              symbol: "N/A",
+                              name: "No Human Ortholog",
+                              entrez_id: "0",
+                              uniprot_id: null 
+                          };
+                          orth = {
+                              id: bestYeast.entrez_id,
+                              symbol: bestYeast.symbol,
+                              score: 0
+                          };
+                      } else {
+                          throw new Error(`Yeast gene '${bestYeast.symbol}' identified, but no Human ortholog was found in DIOPT. Enable 'Manual Mutation Entry' to proceed with Yeast-only analysis.`);
+                      }
+                  }
+              } else {
+                  // Neither human nor yeast found
+                  throw new Error(`Gene '${inputTerm}' not found in MyGene.info (searched Human and Yeast databases).`);
+              }
+          }
       }
 
       setGeneInfo(gInfo);
@@ -2128,8 +2193,12 @@ export const App: React.FC = () => {
           
           rows.push([`${prefix}_sgRNA_Target`, result.site.sequence, group.variantKey, 'sgRNA', 'Guide Target Sequence (20nt)']);
           rows.push([`${prefix}_sgRNA_w_PAM`, result.guideSeqWithPam, group.variantKey, 'sgRNA', 'Guide + PAM Sequence']);
-          rows.push([`${prefix}_Guide_F`, result.cloningOligoA, group.variantKey, 'Oligo', 'Cloning Oligo A (Forward)']);
-          rows.push([`${prefix}_Guide_R`, result.cloningOligoB, group.variantKey, 'Oligo', 'Cloning Oligo B (Reverse)']);
+          if (settings.crispr.cloningType === 'NoClo') {
+              rows.push([`${prefix}_Target_dsDNA`, result.cloningOligoA, group.variantKey, 'dsDNA', 'Target dsDNA']);
+          } else {
+              rows.push([`${prefix}_Guide_F`, result.cloningOligoA, group.variantKey, 'Oligo', 'Cloning Oligo A (Forward)']);
+              rows.push([`${prefix}_Guide_R`, result.cloningOligoB, group.variantKey, 'Oligo', 'Cloning Oligo B (Reverse)']);
+          }
           rows.push([`${prefix}_Repair`, result.repairTemplate, group.variantKey, 'Repair Template', 'Mutant Repair Template']);
           rows.push([`${prefix}_Repair_Del`, result.deletionRepairTemplate, group.variantKey, 'Repair Template', 'Deletion Control Repair Template']);
           
@@ -2203,8 +2272,12 @@ export const App: React.FC = () => {
 
           {/* Stats Header for current guide */}
           <div className="flex flex-wrap gap-4 text-[8px] uppercase font-bold text-emerald-700 dark:text-emerald-300/80 mb-2 items-center">
-              {currentCrispr.score !== undefined && (
+              {currentCrispr.score !== undefined ? (
                   <div className="text-[12px] font-bold">Doench Score: {currentCrispr.score}</div>
+              ) : (
+                  <div className="text-[11px] font-semibold text-slate-400 dark:text-slate-500" title={settings.crispr.pamConstraint !== 'NGG' || settings.crispr.guideLength !== 20 ? "Doench 2014 Rule Set 1 scoring is defined specifically for 20nt SpCas9 (NGG) guides." : "Guide is located too close to sequence terminus (<4bp) to extract 30bp context."}>
+                      Doench Score: <span className="font-normal italic">N/A ({settings.crispr.pamConstraint !== 'NGG' ? settings.crispr.pamConstraint : `${settings.crispr.guideLength}nt`})</span>
+                  </div>
               )}
           </div>
 
@@ -2227,7 +2300,7 @@ export const App: React.FC = () => {
               <div className="flex justify-between items-center mb-1">
                   <div className="flex items-center gap-2">
                       <div className="text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase">Guide ({settings.crispr.pamConstraint})</div>
-                      {currentCrispr.score !== undefined && (
+                      {currentCrispr.score !== undefined ? (
                           <a 
                               href="https://www.nature.com/articles/nbt.3026" 
                               target="_blank" rel="noopener noreferrer"
@@ -2236,6 +2309,13 @@ export const App: React.FC = () => {
                           >
                               Score: {currentCrispr.score}
                           </a>
+                      ) : (
+                          <span 
+                              className="text-[10px] px-1.5 rounded border border-slate-300 dark:border-slate-700 text-slate-400 dark:text-slate-500 bg-slate-100 dark:bg-slate-800"
+                              title={settings.crispr.pamConstraint !== 'NGG' || settings.crispr.guideLength !== 20 ? "Doench 2014 Rule Set 1 scoring is modeled specifically for 20nt SpCas9 NGG targets." : "Guide is located too close to sequence terminus (<4bp) for 30bp context."}
+                          >
+                              Score: N/A
+                          </span>
                       )}
                   </div>
                   <div className="flex gap-1">
@@ -2328,29 +2408,30 @@ export const App: React.FC = () => {
 
                       <div className="relative group pt-1">
                            <div className="flex justify-between text-xs font-bold text-emerald-700 dark:text-emerald-300 uppercase">
-                              <span>All-in-One Oligo A (Forward) <span className="normal-case text-[10px] text-slate-500 font-normal">({currentCrispr.cloningOligoA.length} nt)</span></span>
+                              <span>Target dsDNA (All-in-One Integrated) <span className="normal-case text-[10px] text-slate-500 font-normal">({currentCrispr.cloningOligoA.length} bp)</span></span>
                               <button onClick={() => copyToClipboard(currentCrispr.cloningOligoA)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200 flex items-center gap-1 text-[11px] font-bold"><Copy className="w-3 h-3"/> Copy</button>
                            </div>
                            <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all bg-white dark:bg-slate-900 p-2 rounded border border-emerald-200 dark:border-emerald-800 mt-1 select-all">{currentCrispr.cloningOligoA}</div>
-                      </div>
-                      <div className="relative group">
-                           <div className="flex justify-between text-xs font-bold text-emerald-700 dark:text-emerald-300 uppercase">
-                              <span>All-in-One Oligo B (Reverse Complement) <span className="normal-case text-[10px] text-slate-500 font-normal">({currentCrispr.cloningOligoB.length} nt)</span></span>
-                              <button onClick={() => copyToClipboard(currentCrispr.cloningOligoB)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200 flex items-center gap-1 text-[11px] font-bold"><Copy className="w-3 h-3"/> Copy</button>
-                           </div>
-                           <div className="font-mono text-[11px] text-slate-700 dark:text-slate-300 break-all bg-white dark:bg-slate-900 p-2 rounded border border-emerald-200 dark:border-emerald-800 mt-1 select-all">{currentCrispr.cloningOligoB}</div>
                       </div>
 
                       {/* Deletion Control Integrated Oligo */}
                       {currentCrispr.integratedDeletionOligoA && (
                           <div className="pt-2 border-t border-emerald-200/60 dark:border-emerald-800/60 mt-2">
                               <div className="flex justify-between text-xs font-bold text-slate-600 dark:text-slate-400 uppercase">
-                                  <span>Deletion Control Integrated Oligo A (Forward) <span className="normal-case text-[10px] text-slate-500 font-normal">({currentCrispr.integratedDeletionOligoA.length} nt)</span></span>
+                                  <span>Deletion Control Target dsDNA (All-in-One Integrated) <span className="normal-case text-[10px] text-slate-500 font-normal">({currentCrispr.integratedDeletionOligoA.length} bp)</span></span>
                                   <button onClick={() => copyToClipboard(currentCrispr.integratedDeletionOligoA!)} className="text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 flex items-center gap-1 text-[11px] font-bold"><Copy className="w-3 h-3"/> Copy</button>
                               </div>
                               <div className="font-mono text-[11px] text-slate-600 dark:text-slate-400 break-all bg-white dark:bg-slate-900 p-2 rounded border border-slate-200 dark:border-slate-800 mt-1 select-all">{currentCrispr.integratedDeletionOligoA}</div>
                           </div>
                       )}
+                  </div>
+              ) : settings.crispr.cloningType === 'NoClo' ? (
+                  <div className="relative group">
+                       <div className="flex justify-between text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase">
+                          <span>Target dsDNA <span className="normal-case text-[10px] text-slate-500 font-normal">({currentCrispr.cloningOligoA.length} bp)</span></span>
+                          <button onClick={() => copyToClipboard(currentCrispr.cloningOligoA)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200 flex items-center gap-1 text-[11px] font-bold"><Copy className="w-3 h-3"/> Copy</button>
+                       </div>
+                       <div className="font-mono text-xs text-slate-700 dark:text-slate-300 break-all bg-white dark:bg-slate-900 p-2 rounded border border-emerald-200 dark:border-emerald-800 mt-1 select-all">{currentCrispr.cloningOligoA}</div>
                   </div>
               ) : (
                   <>
@@ -3065,9 +3146,14 @@ export const App: React.FC = () => {
                                     onChange={(e) => setSettings({...settings, structure: {...settings.structure, superpositionMethod: e.target.value as any}})}
                                     className="w-full p-2 border border-slate-300 dark:border-slate-700 rounded text-sm bg-slate-50 dark:bg-slate-900 text-slate-900 dark:text-white focus:ring-2 focus:ring-emerald-500"
                                   >
-                                      <option value="sequence">Sequence Alignment (Kabsch)</option>
-                                      <option value="structure">Structure Alignment (TM-align style)</option>
+                                      <option value="pruned_core">Pruned Core (Outlier Rejection - Default)</option>
+                                      <option value="kabsch_global">Global Kabsch (Full-Length Least-Squares)</option>
+                                      <option value="conserved_anchors">Conserved Homology Anchors</option>
+                                      <option value="tm_weighted">TM-Weighted (Distance-Decayed Soft Weighting)</option>
                                   </select>
+                                  <p className="mt-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                                      Algorithm used to calculate 3D rotation and translation when superimposing human and yeast structures in overlay mode.
+                                  </p>
                               </div>
                           </div>
                       </section>
@@ -3271,7 +3357,7 @@ export const App: React.FC = () => {
                                             if (e.key === 'Enter') {
                                                 const trimmed = geneInput.trim();
                                                 if (trimmed !== geneInput) setGeneInput(trimmed);
-                                                runPipeline(trimmed);
+                                                runPipeline();
                                             }
                                         }}
                                         className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-all"
@@ -3291,9 +3377,9 @@ export const App: React.FC = () => {
                                         onChange={(e) => setDualYeastInput(e.target.value.toUpperCase())}
                                         onKeyDown={(e) => {
                                             if (e.key === 'Enter') {
-                                                const trimmed = geneInput.trim();
-                                                if (trimmed !== geneInput) setGeneInput(trimmed);
-                                                runPipeline(trimmed);
+                                                const trimmedDual = dualYeastInput.trim();
+                                                if (trimmedDual !== dualYeastInput) setDualYeastInput(trimmedDual);
+                                                runPipeline();
                                             }
                                         }}
                                         className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-all"
@@ -3317,7 +3403,7 @@ export const App: React.FC = () => {
                                         if (e.key === 'Enter') {
                                             const trimmed = geneInput.trim();
                                             if (trimmed !== geneInput) setGeneInput(trimmed);
-                                            runPipeline(trimmed);
+                                            runPipeline();
                                         }
                                     }}
                                     className="w-full pl-10 pr-4 py-2 bg-slate-50 dark:bg-slate-900 border border-slate-300 dark:border-slate-600 rounded-lg text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-500 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 transition-all"
@@ -3356,7 +3442,7 @@ export const App: React.FC = () => {
                             const trimmedDual = dualYeastInput.trim();
                             if (trimmedGene !== geneInput) setGeneInput(trimmedGene);
                             if (trimmedDual !== dualYeastInput) setDualYeastInput(trimmedDual);
-                            runPipeline(trimmedGene);
+                            runPipeline();
                         }}
                         disabled={state.step === 'searching' || state.step === 'aligning'}
                         className="w-full flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-2 rounded-lg font-medium transition-all shadow-sm hover:shadow-md h-[42px]"
@@ -3884,7 +3970,7 @@ export const App: React.FC = () => {
 
         {/* ... (Rest of the component remains the same: geneInfo display, etc.) ... */}
         {geneInfo && ortholog && (
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 animate-fade-in">
+          <div className="grid grid-cols-1 min-[1801px]:grid-cols-2 gap-8 animate-fade-in">
             {/* Left Column: Data & Viz */}
             <div className="space-y-8 min-w-0">
               
@@ -4074,23 +4160,32 @@ export const App: React.FC = () => {
                                 <span className="text-emerald-500 ml-1">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
                             )}
                         </th>
-                        <th className="px-3 py-3 font-small whitespace-nowrap cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" onClick={() => { setVariantSortBy('amScore'); setVariantSortDirection(variantSortBy === 'amScore' && variantSortDirection === 'asc' ? 'desc' : 'asc'); }}>
-                            <div className="flex items-center justify-between">
-                                AM Score
+                        <th className="px-2.5 py-2 font-small cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" onClick={() => { setVariantSortBy('amScore'); setVariantSortDirection(variantSortBy === 'amScore' && variantSortDirection === 'asc' ? 'desc' : 'asc'); }}>
+                            <div className="flex items-center justify-between gap-1 leading-tight">
+                                <div>
+                                    <div>AM</div>
+                                    <div>Score</div>
+                                </div>
                                 {variantSortBy === 'amScore' && (
-                                    <span className="text-emerald-500 ml-1">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
+                                    <span className="text-emerald-500 ml-0.5">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
                                 )}
                             </div>
                         </th>
-                        <th className="px-3 py-3 font-small whitespace-nowrap cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" onClick={() => { setVariantSortBy('localHomology'); setVariantSortDirection(variantSortBy === 'localHomology' && variantSortDirection === 'asc' ? 'desc' : 'asc'); }}>
-                            <div className="flex items-center justify-between">
-                                Local Homology
+                        <th className="px-2.5 py-2 font-small cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" onClick={() => { setVariantSortBy('localHomology'); setVariantSortDirection(variantSortBy === 'localHomology' && variantSortDirection === 'asc' ? 'desc' : 'asc'); }}>
+                            <div className="flex items-center justify-between gap-1 leading-tight">
+                                <div>
+                                    <div>Local</div>
+                                    <div>Homology</div>
+                                </div>
                                 {variantSortBy === 'localHomology' && (
-                                    <span className="text-emerald-500 ml-1">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
+                                    <span className="text-emerald-500 ml-0.5">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
                                 )}
                             </div>
                         </th>
-                        <th className="px-3 py-3 font-small whitespace-nowrap">Variant Type</th>
+                        <th className="px-2.5 py-2 font-small leading-tight">
+                            <div>Variant</div>
+                            <div>Type</div>
+                        </th>
                         <th 
                             className="px-3 py-3 font-small whitespace-nowrap cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800"
                             onClick={() => {
@@ -4129,34 +4224,40 @@ export const App: React.FC = () => {
                             </div>
                         </th>
                         <th 
-                            className="px-3 py-3 font-small whitespace-nowrap cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800"
+                            className="px-2.5 py-2 font-small cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800"
                             onClick={() => {
                                 setVariantSortBy('gnomad');
                                 setVariantSortDirection(variantSortBy === 'gnomad' && variantSortDirection === 'asc' ? 'desc' : 'asc');
                             }}
                             title="gnomAD Population Allele Frequency (exomes & genomes)"
                         >
-                            <div className="flex items-center justify-between gap-1">
-                                <span>gnomAD Freq</span>
+                            <div className="flex items-center justify-between gap-1 leading-tight">
+                                <div>
+                                    <div>gnomAD</div>
+                                    <div>Freq</div>
+                                </div>
                                 {variantSortBy === 'gnomad' && (
-                                    <span className="text-emerald-500 ml-1">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
+                                    <span className="text-emerald-500 ml-0.5">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
                                 )}
                             </div>
                         </th>
                         <th 
-                            className="px-3 py-3 font-small whitespace-nowrap cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" 
+                            className="px-2.5 py-2 font-small cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" 
                             onClick={() => { 
                                 setVariantSortBy("stars"); 
                                 setVariantSortDirection(variantSortBy === "stars" && variantSortDirection === "asc" ? "desc" : "asc"); 
                             }}
                         >
-                            <div className="flex items-center justify-between gap-1">
-                                <div className="flex items-center gap-1">
-                                    <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400" />
-                                    <span>ClinVar Stars</span>
+                            <div className="flex items-center justify-between gap-1 leading-tight">
+                                <div>
+                                    <div>ClinVar</div>
+                                    <div className="flex items-center gap-1">
+                                        <Star className="w-3 h-3 text-amber-500 fill-amber-400" />
+                                        <span>Stars</span>
+                                    </div>
                                 </div>
                                 {variantSortBy === "stars" && (
-                                    <span className="text-emerald-500 ml-1">{variantSortDirection === "asc" ? "↑" : "↓"}</span>
+                                    <span className="text-emerald-500 ml-0.5">{variantSortDirection === "asc" ? "↑" : "↓"}</span>
                                 )}
                             </div>
                         </th>
@@ -4364,15 +4465,12 @@ export const App: React.FC = () => {
                                   );
                               })()}
                           </td>
-                          <td className="px-3 py-3 whitespace-nowrap">
+                          <td className="px-2.5 py-2.5 whitespace-nowrap">
                               {v.gnomadFreq !== null && v.gnomadFreq !== undefined ? (() => {
                                   const afNum = v.gnomadFreq;
                                   const displayStr = afNum < 0.001 
-                                      ? afNum.toExponential(2) 
-                                      : `${(afNum * 100).toFixed(3)}%`;
-                                  const altDisplay = afNum < 0.001
-                                      ? `${(afNum * 100).toFixed(4)}%`
-                                      : afNum.toExponential(2);
+                                      ? afNum.toExponential(1) 
+                                      : `${(afNum * 100).toFixed(2)}%`;
                                   const sourceLabel = v.gnomadDetails?.source === 'genome' ? 'Genomes' : 'Exomes';
                                   const countsStr = (v.gnomadDetails?.ac !== undefined && v.gnomadDetails?.an !== undefined)
                                       ? `AC: ${v.gnomadDetails.ac} / AN: ${v.gnomadDetails.an.toLocaleString()}`
@@ -4386,57 +4484,49 @@ export const App: React.FC = () => {
                                   ].filter(Boolean).join('\n');
 
                                   return (
-                                      <div className="flex flex-col gap-0.5" title={tooltipText}>
-                                          <div className="flex items-center gap-1.5">
-                                              {v.gnomadLink ? (
-                                                  <a 
-                                                      href={v.gnomadLink}
-                                                      target="_blank"
-                                                      rel="noopener noreferrer"
-                                                      onClick={(e) => e.stopPropagation()}
-                                                      className="hover:underline font-mono text-xs font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1 group/glink"
-                                                  >
-                                                      <span>{displayStr}</span>
-                                                      <span className="text-[10px] text-slate-400 font-normal">({altDisplay})</span>
-                                                      <ExternalLink className="w-2.5 h-2.5 text-slate-400 group-hover/glink:text-emerald-500" />
-                                                  </a>
-                                              ) : (
-                                                  <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
-                                                      <span>{displayStr}</span>
-                                                      <span className="text-[10px] text-slate-400 font-normal ml-1">({altDisplay})</span>
-                                                  </span>
-                                              )}
-                                              <span className={`text-[9px] font-bold px-1.5 py-0.2 rounded border ${
-                                                  afNum >= 0.01 
-                                                      ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800' 
-                                                      : afNum >= 0.001 
-                                                          ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-300 dark:border-amber-800' 
-                                                          : 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border-blue-200 dark:border-blue-800'
-                                              }`}>
-                                                  {afNum >= 0.01 ? 'Common' : afNum >= 0.001 ? 'Low Freq' : 'Rare'}
+                                      <div className="inline-flex items-center gap-1.5" title={tooltipText}>
+                                          {v.gnomadLink ? (
+                                              <a 
+                                                  href={v.gnomadLink}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  className="hover:underline font-mono text-xs font-semibold text-slate-800 dark:text-slate-200 inline-flex items-center gap-0.5 group/glink"
+                                              >
+                                                  <span>{displayStr}</span>
+                                                  <ExternalLink className="w-2.5 h-2.5 text-slate-400 group-hover/glink:text-emerald-500" />
+                                              </a>
+                                          ) : (
+                                              <span className="font-mono text-xs font-semibold text-slate-800 dark:text-slate-200">
+                                                  {displayStr}
                                               </span>
-                                          </div>
-                                          <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
-                                              <span>v2.1.1 {sourceLabel}</span>
-                                              {countsStr && <span>• {countsStr}</span>}
-                                              {v.gnomadLinkV4 && (
-                                                  <a
-                                                      href={v.gnomadLinkV4}
-                                                      target="_blank"
-                                                      rel="noopener noreferrer"
-                                                      onClick={(e) => e.stopPropagation()}
-                                                      className="text-emerald-600 dark:text-emerald-400 hover:underline font-sans font-medium text-[9px] ml-0.5 inline-flex items-center gap-0.5"
-                                                      title="Open variant in modern gnomAD v4 (GRCh38). Note: v4 allele frequencies differ due to 730k+ additional samples."
-                                                  >
-                                                      [v4 GRCh38]
-                                                  </a>
-                                              )}
-                                          </div>
+                                          )}
+                                          <span className={`text-[9px] font-bold px-1 py-0.2 rounded border ${
+                                              afNum >= 0.01 
+                                                  ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950/60 dark:text-emerald-300 border-emerald-300 dark:border-emerald-800' 
+                                                  : afNum >= 0.001 
+                                                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300 border-amber-300 dark:border-amber-800' 
+                                                      : 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 border-blue-200 dark:border-blue-800'
+                                          }`}>
+                                              {afNum >= 0.01 ? 'Common' : afNum >= 0.001 ? 'Low' : 'Rare'}
+                                          </span>
+                                          {v.gnomadLinkV4 && (
+                                              <a
+                                                  href={v.gnomadLinkV4}
+                                                  target="_blank"
+                                                  rel="noopener noreferrer"
+                                                  onClick={(e) => e.stopPropagation()}
+                                                  className="text-slate-400 hover:text-emerald-500 font-sans text-[9px] font-medium"
+                                                  title="Open in modern gnomAD v4 (GRCh38)"
+                                              >
+                                                  [v4]
+                                              </a>
+                                          )}
                                       </div>
                                   );
                               })() : (
                                   <span className="text-slate-400 dark:text-slate-500 text-xs italic" title="Not observed in gnomAD exomes or genomes (< 1e-5)">
-                                      Absent / Rare
+                                      Absent
                                   </span>
                               )}
                           </td>

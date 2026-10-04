@@ -265,7 +265,7 @@ export interface AdvancedSettings {
   structure: {
     defaultRepresentation: 'cartoon' | 'stick' | 'surface';
     colorScheme: 'chain' | 'secondary' | 'conservation';
-    superpositionMethod: 'sequence' | 'structure';
+    superpositionMethod: 'pruned_core' | 'kabsch_global' | 'conserved_anchors' | 'tm_weighted' | 'sequence' | 'structure';
   };
 }
 

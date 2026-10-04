@@ -3,11 +3,10 @@ node_modules/
 .pnp
 .pnp.js
 
-# Production & Build Artifacts
-dist/
-dist-ssr/
-build/
-out/
+# Production & Build Artifacts (do not ignore dist/build so deployment artifact upload finds them)
+# dist/
+# build/
+# out/
 .vite/
 .cache/
 .turbo/

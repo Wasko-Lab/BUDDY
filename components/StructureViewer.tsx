@@ -1,6 +1,6 @@
 
 import React, { useEffect, useRef, useState, useMemo } from 'react';
-import { Camera, ExternalLink, AlertCircle, RotateCw, Box, Layers, Eye, EyeOff, Palette, Move, MousePointer2, RefreshCw, Check, Database, Save, X, Dna, ChevronDown, Shuffle, Target, Zap, Users, Sparkles, Filter } from 'lucide-react';
+import { Camera, ExternalLink, AlertCircle, RotateCw, Box, Layers, Eye, EyeOff, Palette, Move, MousePointer2, RefreshCw, Check, Database, Save, X, Dna, ChevronDown, Shuffle, Target, Zap, Users, Sparkles, Filter, Maximize2, Minimize2 } from 'lucide-react';
 import { calculateKabschTransform, applyTransform, Point3D, OverlayAlgorithmType, AlignmentMetrics, OVERLAY_ALGORITHMS, computeSuperposition } from '../utils/superposition';
 import { AdvancedSettings, ProteinDomain, FunctionalSite, ProteinPtm, ProteinInterfaceData } from '../types';
 
@@ -255,10 +255,24 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
     v.zoomTo({ resi: resList });
   };
 
-  // Overlay Alignment Algorithm State (allows cycling between Global Kabsch, Pruned Core, Conserved Anchors, TM-Weighted)
-  const [overlayAlgorithm, setOverlayAlgorithm] = useState<OverlayAlgorithmType>('kabsch_global');
+  // Overlay Alignment Algorithm State (allows cycling between Pruned Core, Global Kabsch, Conserved Anchors, TM-Weighted)
+  const [overlayAlgorithm, setOverlayAlgorithm] = useState<OverlayAlgorithmType>(() => {
+    const method = settings?.superpositionMethod;
+    if (method && ['pruned_core', 'kabsch_global', 'conserved_anchors', 'tm_weighted'].includes(method as any)) {
+      return method as OverlayAlgorithmType;
+    }
+    return 'pruned_core';
+  });
   const [alignmentMetrics, setAlignmentMetrics] = useState<AlignmentMetrics | null>(null);
   const [showAlgorithmMenu, setShowAlgorithmMenu] = useState(false);
+
+  // Sync overlay algorithm when settings change
+  useEffect(() => {
+    const method = settings?.superpositionMethod;
+    if (method && ['pruned_core', 'kabsch_global', 'conserved_anchors', 'tm_weighted'].includes(method as any)) {
+      setOverlayAlgorithm(method as OverlayAlgorithmType);
+    }
+  }, [settings?.superpositionMethod]);
 
   // Cached matched coordinates & raw atoms for fast on-the-fly algorithm switching without network reload
   const rawHumanAtomsRef = useRef<{ x: number; y: number; z: number }[] | null>(null);
@@ -345,7 +359,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   const [colors, setColors] = useState({
       singleBase: '#94a3b8', // Slate-400
       singleVariant: '#ef4444', // Red-500
-      humanBase: '#94a3b8',
+      humanBase: '#00aaff', // R 0, G 170, B 255 (Azure Blue)
       humanVariant: '#a855f7', // Purple-500
       yeastBase: '#facc15', // Yellow-400
       yeastVariant: '#ef4444' // Red-500
@@ -365,7 +379,77 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   const [structureInfo, setStructureInfo] = useState<{ source: string, id: string } | null>(null);
   
   const containerRef = useRef<HTMLDivElement>(null);
+  const outerContainerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
+
+  // Fullscreen State
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  const toggleFullscreen = async () => {
+    if (!isFullscreen) {
+      setIsFullscreen(true);
+      if (outerContainerRef.current?.requestFullscreen) {
+        try {
+          await outerContainerRef.current.requestFullscreen();
+        } catch {
+          // If browser/iframe sandbox blocks requestFullscreen, fixed CSS overlay takes over
+        }
+      }
+    } else {
+      setIsFullscreen(false);
+      if (document.fullscreenElement && document.exitFullscreen) {
+        try {
+          await document.exitFullscreen();
+        } catch {}
+      }
+    }
+  };
+
+  // Sync state if browser exits native fullscreen
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange);
+  }, []);
+
+  // Keyboard shortcut: ESC to exit fullscreen
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && isFullscreen) {
+        setIsFullscreen(false);
+        if (document.fullscreenElement && document.exitFullscreen) {
+          document.exitFullscreen().catch(() => {});
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isFullscreen]);
+
+  // Recalibrate and render 3Dmol WebGL canvas whenever fullscreen changes or container dimensions resize
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (viewerRef.current) {
+        viewerRef.current.resize();
+        viewerRef.current.render();
+      }
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [isFullscreen]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver(() => {
+      if (viewerRef.current) {
+        viewerRef.current.resize();
+        viewerRef.current.render();
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   // Sync props to state when gene changes
   useEffect(() => {
@@ -1111,7 +1195,14 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   };
 
   return (
-    <div className="bg-slate-800 rounded-xl border border-slate-700 shadow-sm overflow-hidden flex flex-col h-[650px] animate-fade-in">
+    <div 
+        ref={outerContainerRef}
+        className={`bg-slate-800 border border-slate-700 shadow-sm flex flex-col transition-all duration-200 ${
+            isFullscreen 
+                ? 'fixed inset-0 z-[100] w-screen h-screen rounded-none' 
+                : 'rounded-xl overflow-hidden h-[780px] animate-fade-in'
+        }`}
+    >
         {/* Header */}
         <div className="px-4 py-3 bg-slate-900 border-b border-slate-700 flex justify-between items-center relative">
             <div className="flex items-center gap-2">
@@ -1201,90 +1292,13 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                     </button>
                 </div>
 
-                {/* Optional Cycle Alignment Button with Dropdown (Active in Overlay Mode) */}
-                {viewMode === 'overlay' && (
-                    <div className="relative flex items-center">
-                        <div className="flex items-center rounded-lg bg-slate-800 border border-slate-600 p-0.5 shadow-xs">
-                            <button 
-                                type="button"
-                                onClick={cycleOverlayAlgorithm}
-                                className="px-2.5 py-1 text-xs font-bold text-emerald-400 hover:text-emerald-300 hover:bg-slate-700/80 rounded-md transition-colors flex items-center gap-1.5"
-                                title="Click to cycle alignment algorithm (Global Kabsch ➔ Pruned Core ➔ Conserved Anchors ➔ TM-Weighted)"
-                            >
-                                <RefreshCw className="w-3.5 h-3.5 text-emerald-400 hover:rotate-180 transition-transform" />
-                                <span className="text-white text-xs font-bold">
-                                    {OVERLAY_ALGORITHMS.find(a => a.type === overlayAlgorithm)?.shortName || 'Alignment'}
-                                </span>
-                                {alignmentMetrics && (
-                                    <span className="text-[10px] font-mono font-bold bg-emerald-950/80 text-emerald-300 border border-emerald-800/80 px-1.5 py-0.2 rounded">
-                                        {alignmentMetrics.rmsd.toFixed(2)}Å
-                                    </span>
-                                )}
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => setShowAlgorithmMenu(!showAlgorithmMenu)}
-                                className={`px-1.5 py-1 rounded-md text-slate-400 hover:text-white transition-colors border-l border-slate-700 ${
-                                    showAlgorithmMenu ? 'bg-slate-700 text-white' : ''
-                                }`}
-                                title="Select specific alignment algorithm"
-                            >
-                                <ChevronDown className="w-3.5 h-3.5" />
-                            </button>
-                        </div>
-
-                        {/* Dropdown Menu for Direct Algorithm Selection */}
-                        {showAlgorithmMenu && (
-                            <div className="absolute top-full mt-1.5 right-0 z-50 w-72 bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-2 animate-fade-in text-xs">
-                                <div className="px-2 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800 mb-1 flex justify-between items-center">
-                                    <span>Superposition Algorithm</span>
-                                    <span className="text-[9px] text-emerald-400 font-normal">Click to apply</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {OVERLAY_ALGORITHMS.map(algo => {
-                                        const isSelected = algo.type === overlayAlgorithm;
-                                        return (
-                                            <button
-                                                key={algo.type}
-                                                type="button"
-                                                onClick={() => {
-                                                    applyOverlayAlgorithm(algo.type);
-                                                    setShowAlgorithmMenu(false);
-                                                }}
-                                                className={`w-full text-left p-2 rounded-lg transition-all flex flex-col gap-0.5 ${
-                                                    isSelected 
-                                                        ? 'bg-emerald-950/70 border border-emerald-700/80 text-white shadow-xs' 
-                                                        : 'hover:bg-slate-800 text-slate-300 border border-transparent'
-                                                }`}
-                                            >
-                                                <div className="flex items-center justify-between font-bold">
-                                                    <span className={isSelected ? 'text-emerald-300 font-bold' : 'text-slate-200'}>
-                                                        {algo.name}
-                                                    </span>
-                                                    {isSelected && (
-                                                        <span className="text-[10px] text-emerald-400 bg-emerald-900/60 px-1.5 py-0.2 rounded font-mono font-bold">
-                                                            Active
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <p className="text-[10px] text-slate-400 leading-tight">
-                                                    {algo.description}
-                                                </p>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                        )}
-                    </div>
-                )}
-                {/* 3D Feature Overlays Toolbar Group (Sites, PTMs, Interfaces, Domains - Default OFF) */}
-                <div className="flex items-center gap-1 bg-slate-800/80 p-0.5 rounded-lg border border-slate-700">
-                    {/* Sites & Motifs */}
+                {/* 3D Feature Overlays Toolbar Group (Sites, PTMs, Interfaces, Domains) - 2 Rows for optimal space usage */}
+                <div className="grid grid-cols-2 gap-1 bg-slate-800/90 p-1 rounded-lg border border-slate-700 shadow-xs">
+                    {/* Row 1, Col 1: Sites & Motifs */}
                     <button 
                         type="button"
                         onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'sites' ? null : 'sites')}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                        className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             enabledSiteIds.size > 0
                                 ? 'bg-rose-600 text-white border-rose-500 shadow-sm'
                                 : activeAnnotationTab === 'sites'
@@ -1293,22 +1307,24 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                         }`}
                         title="3D Sites & Motifs: Active catalytic sites, metal coordination, ligand binding, SLiMs (Default: Off)"
                     >
-                        <Target className="w-3.5 h-3.5 text-rose-400" />
-                        <span>Sites</span>
+                        <span className="flex items-center gap-1">
+                            <Target className="w-3 h-3 text-rose-400" />
+                            <span>Sites</span>
+                        </span>
                         {enabledSiteIds.size > 0 ? (
-                            <span className="px-1.5 py-0.2 bg-white text-rose-900 rounded-full text-[10px] font-black">
+                            <span className="px-1 py-0.1 bg-white text-rose-900 rounded-full text-[9px] font-black leading-tight">
                                 {enabledSiteIds.size}
                             </span>
                         ) : (
-                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                            <span className="text-[9px] text-slate-400 font-normal">Off</span>
                         )}
                     </button>
 
-                    {/* PTMs */}
+                    {/* Row 1, Col 2: PTMs */}
                     <button 
                         type="button"
                         onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'ptms' ? null : 'ptms')}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                        className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             enabledPtmIds.size > 0
                                 ? 'bg-amber-600 text-white border-amber-500 shadow-sm'
                                 : activeAnnotationTab === 'ptms'
@@ -1317,50 +1333,54 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                         }`}
                         title="3D Post-Translational Modifications: Phosphorylation, Acetylation, Ubiquitination, etc. (Default: Off)"
                     >
-                        <Zap className="w-3.5 h-3.5 text-amber-400" />
-                        <span>PTMs</span>
+                        <span className="flex items-center gap-1">
+                            <Zap className="w-3 h-3 text-amber-400" />
+                            <span>PTMs</span>
+                        </span>
                         {enabledPtmIds.size > 0 ? (
-                            <span className="px-1.5 py-0.2 bg-white text-amber-900 rounded-full text-[10px] font-black">
+                            <span className="px-1 py-0.1 bg-white text-amber-900 rounded-full text-[9px] font-black leading-tight">
                                 {enabledPtmIds.size}
                             </span>
                         ) : (
-                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                            <span className="text-[9px] text-slate-400 font-normal">Off</span>
                         )}
                     </button>
 
-                    {/* Interfaces */}
+                    {/* Row 2, Col 1: Interfaces */}
                     <button 
                         type="button"
                         onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'interfaces' ? null : 'interfaces')}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                        className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             showAllInterfaces || enabledInterfacePartners.size > 0
                                 ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
                                 : activeAnnotationTab === 'interfaces'
                                     ? 'bg-slate-700 text-white border-slate-500'
                                     : 'bg-slate-800 text-slate-300 hover:text-white border-slate-700 hover:border-slate-600'
                         }`}
-                        title="3D Contact Interfaces: Protein-protein & nucleic acid structural contacts from BioGRID/PDBe-KB (Default: Off)"
+                        title="3D Contact Interfaces: Protein-protein & nucleic acid structural contacts (Default: Off)"
                     >
-                        <Users className="w-3.5 h-3.5 text-emerald-400" />
-                        <span>Interfaces</span>
+                        <span className="flex items-center gap-1">
+                            <Users className="w-3 h-3 text-emerald-400" />
+                            <span>Interfaces</span>
+                        </span>
                         {showAllInterfaces ? (
-                            <span className="px-1.5 py-0.2 bg-white text-emerald-900 rounded-full text-[10px] font-black">
+                            <span className="px-1 py-0.1 bg-white text-emerald-900 rounded-full text-[9px] font-black leading-tight">
                                 All
                             </span>
                         ) : enabledInterfacePartners.size > 0 ? (
-                            <span className="px-1.5 py-0.2 bg-white text-emerald-900 rounded-full text-[10px] font-black">
+                            <span className="px-1 py-0.1 bg-white text-emerald-900 rounded-full text-[9px] font-black leading-tight">
                                 {enabledInterfacePartners.size}
                             </span>
                         ) : (
-                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                            <span className="text-[9px] text-slate-400 font-normal">Off</span>
                         )}
                     </button>
 
-                    {/* Domains */}
+                    {/* Row 2, Col 2: Domains */}
                     <button 
                         type="button"
                         onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'domains' ? null : 'domains')}
-                        className={`px-2.5 py-1 text-xs font-bold rounded-md transition-all flex items-center gap-1.5 border ${
+                        className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             enabledDomainIds.size > 0
                                 ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm'
                                 : activeAnnotationTab === 'domains'
@@ -1369,17 +1389,20 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                         }`}
                         title="3D Protein Domains (Pfam, UniProt, SMART domains) (Default: Off)"
                     >
-                        <Layers className="w-3.5 h-3.5 text-indigo-400" />
-                        <span>Domains</span>
+                        <span className="flex items-center gap-1">
+                            <Layers className="w-3 h-3 text-indigo-400" />
+                            <span>Domains</span>
+                        </span>
                         {enabledDomainIds.size > 0 ? (
-                            <span className="px-1.5 py-0.2 bg-white text-indigo-900 rounded-full text-[10px] font-black">
+                            <span className="px-1 py-0.1 bg-white text-indigo-900 rounded-full text-[9px] font-black leading-tight">
                                 {enabledDomainIds.size}
                             </span>
                         ) : (
-                            <span className="text-[10px] text-slate-400 font-normal">Off</span>
+                            <span className="text-[9px] text-slate-400 font-normal">Off</span>
                         )}
                     </button>
                 </div>
+
                 <button 
                     onClick={handleSnapshot}
                     disabled={loading || !!error}
@@ -1388,15 +1411,54 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                 >
                     <Camera className="w-4 h-4" />
                 </button>
+
+                {/* Fullscreen Button in Top Right Header */}
+                <button 
+                    type="button"
+                    onClick={toggleFullscreen}
+                    className={`p-1.5 rounded-lg transition-colors ${
+                        isFullscreen 
+                            ? 'text-emerald-400 bg-slate-700/80 hover:bg-slate-700' 
+                            : 'text-slate-400 hover:text-emerald-400 hover:bg-slate-700'
+                    }`}
+                    title={isFullscreen ? "Exit Fullscreen (Esc)" : "Expand to Fullscreen"}
+                >
+                    {isFullscreen ? (
+                        <Minimize2 className="w-4 h-4 text-emerald-400" />
+                    ) : (
+                        <Maximize2 className="w-4 h-4" />
+                    )}
+                </button>
             </div>
         </div>
 
         {/* Viewer Area */}
         <div className="flex-grow relative bg-slate-900 group">
-            {/* Overlay Superposition Metrics & Quick-Cycle HUD Chip */}
+            {/* Fullscreen Floating Exit Button */}
+            {isFullscreen && (
+                <button
+                    type="button"
+                    onClick={toggleFullscreen}
+                    className="absolute top-3 left-3 z-30 flex items-center gap-1.5 px-3 py-1.5 bg-slate-900/90 hover:bg-slate-800 text-slate-200 hover:text-white border border-slate-700 rounded-lg shadow-xl text-xs font-semibold backdrop-blur-md transition-all group/fs"
+                    title="Exit Fullscreen (Esc)"
+                >
+                    <Minimize2 className="w-3.5 h-3.5 text-emerald-400 group-hover/fs:scale-110 transition-transform" />
+                    <span>Exit Fullscreen</span>
+                    <kbd className="px-1.5 py-0.5 text-[10px] bg-slate-800 border border-slate-600 rounded text-slate-400 font-mono">ESC</kbd>
+                </button>
+            )}
+            {/* Overlay Superposition Metrics & Quick-Cycle HUD Chip on Canvas */}
             {viewMode === 'overlay' && alignmentMetrics && !activeAnnotationTab && (
                 <div className="absolute top-3 right-3 z-20 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md border border-slate-700/80 rounded-lg px-2.5 py-1.5 text-xs text-slate-300 shadow-xl pointer-events-auto animate-fade-in">
-                    <span className="font-bold text-white text-xs">{alignmentMetrics.shortName}</span>
+                    <button
+                        type="button"
+                        onClick={() => setShowAlgorithmMenu(!showAlgorithmMenu)}
+                        className="font-bold text-white hover:text-emerald-400 text-xs flex items-center gap-1 transition-colors"
+                        title="Click to select specific superposition algorithm"
+                    >
+                        <span>{alignmentMetrics.shortName}</span>
+                        <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${showAlgorithmMenu ? 'rotate-180 text-white' : ''}`} />
+                    </button>
                     <span className="text-slate-600">•</span>
                     <span className="font-mono text-emerald-400 font-bold text-xs">
                         RMSD: {alignmentMetrics.rmsd.toFixed(2)} Å
@@ -1415,6 +1477,50 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                         <RefreshCw className="w-2.5 h-2.5" />
                         Cycle
                     </button>
+
+                    {/* Superposition Algorithm Dropdown directly on HUD chip */}
+                    {showAlgorithmMenu && (
+                        <div className="absolute top-full mt-1.5 right-0 z-50 w-72 bg-slate-900/95 backdrop-blur-md border border-slate-700 rounded-xl shadow-2xl p-2 animate-fade-in text-xs">
+                            <div className="px-2 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-800 mb-1 flex justify-between items-center">
+                                <span>Superposition Algorithm</span>
+                                <span className="text-[9px] text-emerald-400 font-normal">Click to apply</span>
+                            </div>
+                            <div className="space-y-1">
+                                {OVERLAY_ALGORITHMS.map(algo => {
+                                    const isSelected = algo.type === overlayAlgorithm;
+                                    return (
+                                        <button
+                                            key={algo.type}
+                                            type="button"
+                                            onClick={() => {
+                                                applyOverlayAlgorithm(algo.type);
+                                                setShowAlgorithmMenu(false);
+                                            }}
+                                            className={`w-full text-left p-2 rounded-lg transition-all flex flex-col gap-0.5 ${
+                                                isSelected 
+                                                    ? 'bg-emerald-950/70 border border-emerald-700/80 text-white shadow-xs' 
+                                                    : 'hover:bg-slate-800 text-slate-300 border border-transparent'
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between font-bold">
+                                                <span className={isSelected ? 'text-emerald-300 font-bold' : 'text-slate-200'}>
+                                                    {algo.name}
+                                                </span>
+                                                {isSelected && (
+                                                    <span className="text-[10px] text-emerald-400 bg-emerald-900/60 px-1.5 py-0.2 rounded font-mono font-bold">
+                                                        Active
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <p className="text-[10px] text-slate-400 leading-tight">
+                                                {algo.description}
+                                            </p>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
                 </div>
             )}
             

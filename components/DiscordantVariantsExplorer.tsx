@@ -190,7 +190,12 @@ export const DiscordantVariantsExplorer: React.FC<DiscordantVariantsExplorerProp
       for (const v of list) {
         counts.set(v.gene, (counts.get(v.gene) || 0) + 1);
       }
-      list = list.filter(v => (counts.get(v.gene) || 0) > minVariantsPerGene);
+      list = list.filter(v => {
+        const geneCount = (typeof v.geneVariantCount === 'number' && v.geneVariantCount > 0)
+          ? v.geneVariantCount
+          : (counts.get(v.gene) || 0);
+        return geneCount > minVariantsPerGene;
+      });
     }
 
     // Submissions filter
@@ -296,7 +301,9 @@ export const DiscordantVariantsExplorer: React.FC<DiscordantVariantsExplorerProp
   const geneVariantCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const v of displayedVariants) {
-      counts.set(v.gene, (counts.get(v.gene) || 0) + 1);
+      const authoritative = (typeof v.geneVariantCount === 'number' && v.geneVariantCount > 0) ? v.geneVariantCount : 0;
+      const current = counts.get(v.gene) || 0;
+      counts.set(v.gene, Math.max(authoritative, current + 1));
     }
     return counts;
   }, [displayedVariants]);
@@ -723,8 +730,13 @@ export const DiscordantVariantsExplorer: React.FC<DiscordantVariantsExplorerProp
                   const val = Math.max(0, parseInt(e.target.value, 10) || 0);
                   setMinVariantsPerGene(val);
                 }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    executeSearch(1);
+                  }
+                }}
                 className="w-12 px-1 py-0.5 bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-600 rounded text-slate-900 dark:text-white text-xs font-bold text-center focus:ring-1 focus:ring-emerald-500"
-                title="Only show genes with more than this number of discordant variants (e.g. enter 1 to show genes with 2+ variants)"
+                title="Only show genes with more than this number of discordant variants (e.g. enter 8 to show genes with > 8 variants). Press Enter to query."
               />
               <span className="text-slate-500 dark:text-slate-400 font-medium">vars</span>
               {minVariantsPerGene > 0 && (
@@ -1172,9 +1184,18 @@ export const DiscordantVariantsExplorer: React.FC<DiscordantVariantsExplorerProp
                   <tr className="bg-slate-50 dark:bg-slate-900/80 border-b border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-400 uppercase font-bold tracking-wider text-[11px]">
                     <th className="py-3 px-4">Gene Symbol</th>
                     <th className="py-3 px-4">Variant (HGVS)</th>
-                    <th className="py-3 px-4">ClinVar / Submissions</th>
-                    <th className="py-3 px-4">AlphaMissense</th>
-                    <th className="py-3 px-4">gnomAD Frequency</th>
+                    <th className="py-2.5 px-3">
+                      <div>ClinVar /</div>
+                      <div>Submissions</div>
+                    </th>
+                    <th className="py-2.5 px-3">
+                      <div>Alpha</div>
+                      <div>Missense</div>
+                    </th>
+                    <th className="py-2.5 px-3">
+                      <div>gnomAD</div>
+                      <div>Frequency</div>
+                    </th>
                     <th className="py-3 px-4">Tension / Interpretation</th>
                     <th className="py-3 px-4">Condition / Disease</th>
                     <th className="py-3 px-4 text-right">Actions</th>
@@ -1329,93 +1350,75 @@ export const DiscordantVariantsExplorer: React.FC<DiscordantVariantsExplorerProp
                           </td>
 
                           {/* gnomAD Population Frequency */}
-                          <td className="py-3 px-4">
-                            <div className="space-y-1">
-                              {v.gnomadAf !== null && v.gnomadAf !== undefined ? (() => {
-                                const afVal = v.gnomadAf;
-                                const isExome = v.gnomadExomeAf !== null && v.gnomadExomeAf !== undefined;
-                                const sourceTag = isExome ? 'Exomes' : 'Genomes';
-                                const displayStr = afVal < 0.001 ? afVal.toExponential(2) : `${(afVal * 100).toFixed(4)}%`;
-                                const altStr = afVal < 0.001 ? `${(afVal * 100).toFixed(4)}%` : afVal.toExponential(2);
-                                const countInfo = isExome && v.gnomadExomeAc !== null && v.gnomadExomeAn !== null
-                                  ? `AC: ${v.gnomadExomeAc} / AN: ${v.gnomadExomeAn.toLocaleString()}`
-                                  : (!isExome && v.gnomadGenomeAc !== null && v.gnomadGenomeAn !== null)
-                                    ? `AC: ${v.gnomadGenomeAc} / AN: ${v.gnomadGenomeAn.toLocaleString()}`
-                                    : null;
-                                const tooltipInfo = [
-                                  `gnomAD v2.1.1 (${sourceTag}):`,
-                                  `• Allele Frequency: ${afVal} (${afVal.toExponential(4)} | ${(afVal * 100).toFixed(4)}%)`,
-                                  countInfo ? `• Allele Count: ${countInfo}` : null,
-                                  `• Primary link opens gnomAD v2.1.1 where this exact frequency appears in the table.`,
-                                  v.gnomadLinkV4 ? `• Note: gnomAD v4 (GRCh38) has ~730k more samples, so v4 frequencies will differ.` : null
-                                ].filter(Boolean).join('\n');
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            {v.gnomadAf !== null && v.gnomadAf !== undefined ? (() => {
+                              const afVal = v.gnomadAf;
+                              const isExome = v.gnomadExomeAf !== null && v.gnomadExomeAf !== undefined;
+                              const sourceTag = isExome ? 'Exomes' : 'Genomes';
+                              const displayStr = afVal < 0.001 ? afVal.toExponential(1) : `${(afVal * 100).toFixed(2)}%`;
+                              const countInfo = isExome && v.gnomadExomeAc !== null && v.gnomadExomeAn !== null
+                                ? `AC: ${v.gnomadExomeAc} / AN: ${v.gnomadExomeAn.toLocaleString()}`
+                                : (!isExome && v.gnomadGenomeAc !== null && v.gnomadGenomeAn !== null)
+                                  ? `AC: ${v.gnomadGenomeAc} / AN: ${v.gnomadGenomeAn.toLocaleString()}`
+                                  : null;
+                              const tooltipInfo = [
+                                `gnomAD v2.1.1 (${sourceTag}):`,
+                                `• Allele Frequency: ${afVal} (${afVal.toExponential(4)} | ${(afVal * 100).toFixed(4)}%)`,
+                                countInfo ? `• Allele Count: ${countInfo}` : null,
+                                `• Primary link opens gnomAD v2.1.1 where this exact frequency appears in the table.`,
+                                v.gnomadLinkV4 ? `• Note: gnomAD v4 (GRCh38) has ~730k more samples, so v4 frequencies will differ.` : null
+                              ].filter(Boolean).join('\n');
 
-                                return (
-                                  <div title={tooltipInfo} className="space-y-0.5">
-                                    <div className="flex items-center gap-1.5 flex-wrap">
-                                      {v.gnomadLink ? (
-                                        <a
-                                          href={v.gnomadLink}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          className="font-mono font-bold text-slate-900 dark:text-white text-xs hover:underline inline-flex items-center gap-1 group"
-                                          onClick={(e) => e.stopPropagation()}
-                                        >
-                                          <span>{displayStr}</span>
-                                          <span className="text-[10px] text-slate-400 font-normal">({altStr})</span>
-                                          <ExternalLink className="w-2.5 h-2.5 text-slate-400 group-hover:text-blue-500" />
-                                        </a>
-                                      ) : (
-                                        <div className="font-mono font-bold text-slate-900 dark:text-white text-xs">
-                                          <span>{displayStr}</span>
-                                          <span className="text-[10px] text-slate-400 font-normal ml-1">({altStr})</span>
-                                        </div>
-                                      )}
-                                      {v.gnomadLinkV4 && (
-                                        <a
-                                          href={v.gnomadLinkV4}
-                                          target="_blank"
-                                          rel="noopener noreferrer"
-                                          onClick={(e) => e.stopPropagation()}
-                                          className="text-emerald-600 dark:text-emerald-400 hover:underline font-sans font-medium text-[9px]"
-                                          title="Open in gnomAD v4 (GRCh38). Note: v4 allele frequencies differ due to 730k+ additional samples."
-                                        >
-                                          [v4]
-                                        </a>
-                                      )}
-                                    </div>
-                                    <div className="text-[10px] text-slate-400 font-mono">
-                                      <span>v2.1.1 {sourceTag}</span>
-                                      {countInfo && <span className="ml-1">• {countInfo}</span>}
-                                    </div>
-                                    <div className="mt-0.5">
-                                      {v.gnomadAf >= 0.01 ? (
-                                        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600" title="Allele frequency ≥ 1% (Common population polymorphism)">
-                                          Common (High Background)
-                                        </span>
-                                      ) : v.gnomadAf >= 0.001 ? (
-                                        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-100 dark:bg-sky-950/70 text-sky-800 dark:text-sky-300 border border-sky-200 dark:border-sky-800" title="Allele frequency 0.1% - 1% (Low-frequency population variant)">
-                                          Low-Frequency (0.1%–1%)
-                                        </span>
-                                      ) : (
-                                        <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Allele frequency < 0.1% (Rare population variant)">
-                                          Rare (&lt;0.1%)
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                );
-                              })() : (
-                                <div>
-                                  <span className="inline-block font-mono text-[10px] font-bold text-purple-700 dark:text-purple-300 bg-purple-50 dark:bg-purple-950/60 px-1.5 py-0.5 rounded border border-purple-200 dark:border-purple-800" title="Not identified in gnomAD exomes or genomes (ultra-rare or absent)">
-                                    Absent / &lt;1e-5
-                                  </span>
-                                  <div className="text-[10px] text-slate-400 mt-0.5">
-                                    Not in gnomAD
-                                  </div>
+                              return (
+                                <div title={tooltipInfo} className="inline-flex items-center gap-1.5">
+                                  {v.gnomadLink ? (
+                                    <a
+                                      href={v.gnomadLink}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="font-mono font-bold text-slate-900 dark:text-white text-xs hover:underline inline-flex items-center gap-0.5 group"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <span>{displayStr}</span>
+                                      <ExternalLink className="w-2.5 h-2.5 text-slate-400 group-hover:text-blue-500" />
+                                    </a>
+                                  ) : (
+                                    <span className="font-mono font-bold text-slate-900 dark:text-white text-xs">
+                                      {displayStr}
+                                    </span>
+                                  )}
+                                  {v.gnomadAf >= 0.01 ? (
+                                    <span className="inline-block px-1 py-0.2 rounded text-[9px] font-bold bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-600" title="Allele frequency ≥ 1% (Common polymorphism)">
+                                      Common
+                                    </span>
+                                  ) : v.gnomadAf >= 0.001 ? (
+                                    <span className="inline-block px-1 py-0.2 rounded text-[9px] font-bold bg-sky-100 dark:bg-sky-950/70 text-sky-800 dark:text-sky-300 border border-sky-200 dark:border-sky-800" title="Allele frequency 0.1% - 1% (Low frequency)">
+                                      Low
+                                    </span>
+                                  ) : (
+                                    <span className="inline-block px-1 py-0.2 rounded text-[9px] font-bold bg-amber-100 dark:bg-amber-950/70 text-amber-800 dark:text-amber-300 border border-amber-200 dark:border-amber-800" title="Allele frequency < 0.1% (Rare)">
+                                      Rare
+                                    </span>
+                                  )}
+                                  {v.gnomadLinkV4 && (
+                                    <a
+                                      href={v.gnomadLinkV4}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="text-slate-400 hover:text-emerald-500 font-sans font-medium text-[9px]"
+                                      title="Open in modern gnomAD v4 (GRCh38)"
+                                    >
+                                      [v4]
+                                    </a>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })() : (
+                              <span className="text-slate-400 dark:text-slate-500 text-xs italic" title="Not identified in gnomAD (< 1e-5)">
+                                Absent
+                              </span>
+                            )}
                           </td>
 
                           {/* Discordance Tension & Interpretation */}

@@ -22,12 +22,13 @@ const parsedSummary = summaryTsv
 
 // --- MyGene.info ---
 export const getHumanGeneInfo = async (symbol: string): Promise<GeneInfo> => {
+  const cleanSymbol = symbol.trim();
   // If input is all digits, treat as Entrez ID
-  const isEntrezId = /^\d+$/.test(symbol);
-  let url = `https://mygene.info/v3/query?q=${symbol}&scopes=symbol,alias&fields=symbol,entrezgene,name,uniprot,type_of_gene&species=human`;
+  const isEntrezId = /^\d+$/.test(cleanSymbol);
+  let url = `https://mygene.info/v3/query?q=${encodeURIComponent(cleanSymbol)}&scopes=symbol,alias&fields=symbol,entrezgene,name,uniprot,type_of_gene&species=human`;
   
   if (isEntrezId) {
-    url = `https://mygene.info/v3/gene/${symbol}?fields=symbol,entrezgene,name,uniprot,type_of_gene`;
+    url = `https://mygene.info/v3/gene/${encodeURIComponent(cleanSymbol)}?fields=symbol,entrezgene,name,uniprot,type_of_gene`;
   }
 
   const response = await fetch(url);
@@ -38,7 +39,7 @@ export const getHumanGeneInfo = async (symbol: string): Promise<GeneInfo> => {
     hit = data;
   } else {
     if (!data.hits || data.hits.length === 0) {
-      throw new Error("Gene not found in MyGene.info");
+      throw new Error(`Human gene '${cleanSymbol}' not found in MyGene.info`);
     }
     hit = data.hits[0];
   }
@@ -182,7 +183,7 @@ export const searchGenesByAi = async (topic: string, species: 'human' | 'yeast')
     return validGenes;
 };
 
-export const searchGenes = async (term: string, species: 'human' | 'yeast' = 'human'): Promise<{ symbol: string; name: string; entrez_id: string }[]> => {
+export const searchGenes = async (term: string, species: 'human' | 'yeast' = 'human'): Promise<{ symbol: string; name: string; entrez_id: string; locus_tag?: string | null; hasUniprot?: boolean; type_of_gene?: string }[]> => {
   // For yeast, include 559292 (S288C) explicitly alongside 4932 to ensure strain-specific hits are caught
   const speciesQuery = species === 'human' ? 'human' : '4932,559292';
   
@@ -249,7 +250,8 @@ export const searchGenes = async (term: string, species: 'human' | 'yeast' = 'hu
     // Fallback to _id if entrezgene is missing (usually _id IS the entrez id)
     entrez_id: hit.entrezgene?.toString() || hit._id,
     hasUniprot: !!hit.uniprot,
-    type_of_gene: hit.type_of_gene
+    type_of_gene: hit.type_of_gene,
+    locus_tag: hit.locus_tag || null
   }))
   .filter((g: any) => {
       // Basic validity

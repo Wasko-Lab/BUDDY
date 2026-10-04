@@ -810,6 +810,75 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
     };
   }
 
+  // In-memory cache for discordant gene facets across genome
+  const discordantFacetCache = new Map<string, { timestamp: number; counts: Map<string, number> }>();
+  const FACET_CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+
+  async function getDiscordantGeneFacetCounts(
+    type: string,
+    bQuery: string,
+    pQuery: string,
+    rQuery: string,
+    cacheKey: string
+  ): Promise<Map<string, number>> {
+    const cached = discordantFacetCache.get(cacheKey);
+    if (cached && (Date.now() - cached.timestamp < FACET_CACHE_TTL)) {
+      return cached.counts;
+    }
+
+    const counts = new Map<string, number>();
+    try {
+      if (type === 'ALL') {
+        const [bRes, pRes] = await Promise.all([
+          fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&facets=dbnsfp.genename&facet_size=1000&size=0`)
+            .then(r => r.ok ? r.json() : { facets: {} })
+            .catch(() => ({ facets: {} })),
+          fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&facets=dbnsfp.genename&facet_size=1000&size=0`)
+            .then(r => r.ok ? r.json() : { facets: {} })
+            .catch(() => ({ facets: {} }))
+        ]);
+
+        for (const t of (bRes.facets?.["dbnsfp.genename"]?.terms || [])) {
+          const sym = String(t.term || '').toUpperCase();
+          if (sym) counts.set(sym, (counts.get(sym) || 0) + (t.count || 0));
+        }
+        for (const t of (pRes.facets?.["dbnsfp.genename"]?.terms || [])) {
+          const sym = String(t.term || '').toUpperCase();
+          if (sym) counts.set(sym, (counts.get(sym) || 0) + (t.count || 0));
+        }
+      } else if (type === 'BENIGN_AM_PATHOGENIC') {
+        const res = await fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&facets=dbnsfp.genename&facet_size=1000&size=0`)
+          .then(r => r.ok ? r.json() : { facets: {} })
+          .catch(() => ({ facets: {} }));
+        for (const t of (res.facets?.["dbnsfp.genename"]?.terms || [])) {
+          const sym = String(t.term || '').toUpperCase();
+          if (sym) counts.set(sym, (counts.get(sym) || 0) + (t.count || 0));
+        }
+      } else if (type === 'PATHOGENIC_AM_BENIGN') {
+        const res = await fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&facets=dbnsfp.genename&facet_size=1000&size=0`)
+          .then(r => r.ok ? r.json() : { facets: {} })
+          .catch(() => ({ facets: {} }));
+        for (const t of (res.facets?.["dbnsfp.genename"]?.terms || [])) {
+          const sym = String(t.term || '').toUpperCase();
+          if (sym) counts.set(sym, (counts.get(sym) || 0) + (t.count || 0));
+        }
+      } else if (type === 'RECURRENT_BENIGN') {
+        const res = await fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(rQuery)}&facets=dbnsfp.genename&facet_size=1000&size=0`)
+          .then(r => r.ok ? r.json() : { facets: {} })
+          .catch(() => ({ facets: {} }));
+        for (const t of (res.facets?.["dbnsfp.genename"]?.terms || [])) {
+          const sym = String(t.term || '').toUpperCase();
+          if (sym) counts.set(sym, (counts.get(sym) || 0) + (t.count || 0));
+        }
+      }
+
+      discordantFacetCache.set(cacheKey, { timestamp: Date.now(), counts });
+    } catch (err: any) {
+      console.warn("Failed to fetch discordant gene facets:", err?.message);
+    }
+    return counts;
+  }
+
   // --- /api/discordant-variants (Search ClinVar ⇄ AlphaMissense Discordant Variants) ---
   const handleDiscordantVariantsRequest = async (req: express.Request, res: express.Response) => {
     try {
@@ -928,51 +997,104 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
 
       const requestedFields = "clinvar,dbnsfp,dbsnp,gnomad_exome.af.af,gnomad_genome.af.af,hg19,hg38";
 
+      const bQuery = `${benignClause || `((clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign") AND dbnsfp.alphamissense.score:>=${minAmPathScore})`}${negation}${starFilter}${submissionFilter}`;
+      const pQuery = `${pathogenicClause || `((clinvar.rcv.clinical_significance:"Pathogenic" OR clinvar.rcv.clinical_significance:"Likely pathogenic") AND dbnsfp.alphamissense.score:<=${maxAmBenignScore})`}${negation}${starFilter}${submissionFilter}`;
+      const rQuery = `${recurrentBenignClause || `(clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign")`} AND _exists_:dbnsfp.alphamissense.score${negation}${starFilter}${submissionFilter}`;
+
+      // In All Genes mode, fetch genome-wide discordant gene facet counts to accurately determine variant counts per gene
+      const facetCacheKey = `${type}_${minStars}_${minSubmissions}_${minAmPathScore}_${maxAmBenignScore}_${includeBenign}_${includeLikelyBenign}_${includePathogenic}_${includeLikelyPathogenic}`;
+      let geneFacetCounts = new Map<string, number>();
       if (isAllGenes) {
-        // Genome-wide query
-        if (type === 'ALL') {
-          // Query both benign and pathogenic streams in parallel to prevent Elasticsearch BM25 from starving either direction
-          const halfSize = Math.max(25, Math.ceil(pageSize / 2));
-          const fromOffset = (page - 1) * halfSize;
+        geneFacetCounts = await getDiscordantGeneFacetCounts(type, bQuery, pQuery, rQuery, facetCacheKey);
+      }
 
-          const bQuery = `${benignClause || `((clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign") AND dbnsfp.alphamissense.score:>=${minAmPathScore})`}${negation}${starFilter}${submissionFilter}`;
-          const pQuery = `${pathogenicClause || `((clinvar.rcv.clinical_significance:"Pathogenic" OR clinvar.rcv.clinical_significance:"Likely pathogenic") AND dbnsfp.alphamissense.score:<=${maxAmBenignScore})`}${negation}${starFilter}${submissionFilter}`;
+      if (isAllGenes) {
+        if (minVariantsPerGene > 0) {
+          // Identify all genes that meet/exceed minVariantsPerGene across the full database
+          let qualifiedGenes = [...geneFacetCounts.entries()]
+            .filter(([_, count]) => count > minVariantsPerGene)
+            .sort((a, b) => b[1] - a[1])
+            .map(([gene]) => gene);
 
-          const [bRes, pRes] = await Promise.all([
-            fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&fields=${requestedFields}&size=1000&from=${fromOffset}`).then(r => r.json()).catch(() => ({ hits: [], total: 0 })),
-            fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&fields=${requestedFields}&size=1000&from=${fromOffset}`).then(r => r.json()).catch(() => ({ hits: [], total: 0 }))
-          ]);
+          // If user searched for a specific gene/term in text search, ensure it's filtered or included
+          if (searchQuery && searchQuery.trim()) {
+            const sq = searchQuery.trim().toUpperCase();
+            const matching = qualifiedGenes.filter(g => g.includes(sq));
+            if (matching.length > 0) {
+              qualifiedGenes = matching;
+            }
+          }
 
-          totalBenignEstimate = bRes.total || 0;
-          totalPathogenicEstimate = pRes.total || 0;
-          totalCountEstimate = totalBenignEstimate + totalPathogenicEstimate;
-          allRawHits = [...(bRes.hits || []), ...(pRes.hits || [])];
-        } else if (type === 'BENIGN_AM_PATHOGENIC') {
-          const bQuery = `${benignClause || `((clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign") AND dbnsfp.alphamissense.score:>=${minAmPathScore})`}${negation}${starFilter}${submissionFilter}`;
-          const queryUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&fields=${requestedFields}&size=1000&from=${(page - 1) * pageSize}`;
-          const mvRes = await fetch(queryUrl);
-          const mvData = mvRes.ok ? await mvRes.json() : { hits: [], total: 0 };
-          allRawHits = mvData.hits || [];
-          totalBenignEstimate = mvData.total || allRawHits.length;
-          totalCountEstimate = totalBenignEstimate;
-        } else if (type === 'RECURRENT_BENIGN') {
-          const rQuery = `${recurrentBenignClause || `(clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign")`} AND _exists_:dbnsfp.alphamissense.score${negation}${starFilter}${submissionFilter}`;
-          const queryUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(rQuery)}&fields=${requestedFields}&size=1000&from=${(page - 1) * pageSize}`;
-          const mvRes = await fetch(queryUrl);
-          const mvData = mvRes.ok ? await mvRes.json() : { hits: [], total: 0 };
-          allRawHits = mvData.hits || [];
-          totalRecurrentEstimate = mvData.total || allRawHits.length;
-          totalCountEstimate = totalRecurrentEstimate;
+          // Query the top qualified genes in chunks to fetch their variants
+          const targetGenes = qualifiedGenes.slice(0, 60);
+          const CHUNK_SIZE = 30;
+          const chunks: string[][] = [];
+          for (let i = 0; i < targetGenes.length; i += CHUNK_SIZE) {
+            chunks.push(targetGenes.slice(i, i + CHUNK_SIZE));
+          }
+
+          const chunkPromises = chunks.map(async (geneChunk) => {
+            const geneGroup = geneChunk.join(" OR ");
+            if (type === 'ALL') {
+              const bChunkQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${bQuery}`;
+              const pChunkQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${pQuery}`;
+
+              const [bResp, pResp] = await Promise.all([
+                fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bChunkQuery)}&fields=${requestedFields}&size=1000`).then(r => r.ok ? r.json() : { hits: [] }).catch(() => ({ hits: [] })),
+                fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pChunkQuery)}&fields=${requestedFields}&size=1000`).then(r => r.ok ? r.json() : { hits: [] }).catch(() => ({ hits: [] }))
+              ]);
+              return [...(bResp.hits || []), ...(pResp.hits || [])];
+            } else {
+              const chunkQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${coreFilter}${type === 'RECURRENT_BENIGN' ? ' AND _exists_:dbnsfp.alphamissense.score' : ''}${negation}${starFilter}${submissionFilter}`;
+              const chunkUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(chunkQuery)}&fields=${requestedFields}&size=1000`;
+              const resp = await fetch(chunkUrl);
+              if (!resp.ok) return [];
+              const data = await resp.json();
+              return data.hits || [];
+            }
+          });
+
+          const chunkResults = await Promise.all(chunkPromises);
+          allRawHits = chunkResults.flat();
+          totalCountEstimate = qualifiedGenes.reduce((sum, g) => sum + (geneFacetCounts.get(g) || 0), 0) || allRawHits.length;
         } else {
-          const pQuery = `${pathogenicClause || `((clinvar.rcv.clinical_significance:"Pathogenic" OR clinvar.rcv.clinical_significance:"Likely pathogenic") AND dbnsfp.alphamissense.score:<=${maxAmBenignScore})`}${negation}${starFilter}${submissionFilter}`;
-          const queryUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&fields=${requestedFields}&size=1000&from=${(page - 1) * pageSize}`;
-          const mvRes = await fetch(queryUrl);
-          const mvData = mvRes.ok ? await mvRes.json() : { hits: [], total: 0 };
-          allRawHits = mvData.hits || [];
-          totalPathogenicEstimate = mvData.total || allRawHits.length;
-          totalCountEstimate = totalPathogenicEstimate;
-        }
+          // Standard genome-wide streaming sample for page
+          if (type === 'ALL') {
+            const halfSize = Math.max(25, Math.ceil(pageSize / 2));
+            const fromOffset = (page - 1) * halfSize;
 
+            const [bRes, pRes] = await Promise.all([
+              fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&fields=${requestedFields}&size=1000&from=${fromOffset}`).then(r => r.json()).catch(() => ({ hits: [], total: 0 })),
+              fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&fields=${requestedFields}&size=1000&from=${fromOffset}`).then(r => r.json()).catch(() => ({ hits: [], total: 0 }))
+            ]);
+
+            totalBenignEstimate = bRes.total || 0;
+            totalPathogenicEstimate = pRes.total || 0;
+            totalCountEstimate = totalBenignEstimate + totalPathogenicEstimate;
+            allRawHits = [...(bRes.hits || []), ...(pRes.hits || [])];
+          } else if (type === 'BENIGN_AM_PATHOGENIC') {
+            const queryUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&fields=${requestedFields}&size=1000&from=${(page - 1) * pageSize}`;
+            const mvRes = await fetch(queryUrl);
+            const mvData = mvRes.ok ? await mvRes.json() : { hits: [], total: 0 };
+            allRawHits = mvData.hits || [];
+            totalBenignEstimate = mvData.total || allRawHits.length;
+            totalCountEstimate = totalBenignEstimate;
+          } else if (type === 'RECURRENT_BENIGN') {
+            const queryUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(rQuery)}&fields=${requestedFields}&size=1000&from=${(page - 1) * pageSize}`;
+            const mvRes = await fetch(queryUrl);
+            const mvData = mvRes.ok ? await mvRes.json() : { hits: [], total: 0 };
+            allRawHits = mvData.hits || [];
+            totalRecurrentEstimate = mvData.total || allRawHits.length;
+            totalCountEstimate = totalRecurrentEstimate;
+          } else {
+            const queryUrl = `https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&fields=${requestedFields}&size=1000&from=${(page - 1) * pageSize}`;
+            const mvRes = await fetch(queryUrl);
+            const mvData = mvRes.ok ? await mvRes.json() : { hits: [], total: 0 };
+            allRawHits = mvData.hits || [];
+            totalPathogenicEstimate = mvData.total || allRawHits.length;
+            totalCountEstimate = totalPathogenicEstimate;
+          }
+        }
       } else {
         // Chunk gene list in groups of up to 60 genes to avoid URL limits
         const CHUNK_SIZE = 60;
@@ -984,12 +1106,12 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         const chunkPromises = chunks.map(async (geneChunk) => {
           const geneGroup = geneChunk.join(" OR ");
           if (type === 'ALL') {
-            const bQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${benignClause || `((clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign") AND dbnsfp.alphamissense.score:>=${minAmPathScore})`}${negation}${starFilter}${submissionFilter}`;
-            const pQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${pathogenicClause || `((clinvar.rcv.clinical_significance:"Pathogenic" OR clinvar.rcv.clinical_significance:"Likely pathogenic") AND dbnsfp.alphamissense.score:<=${maxAmBenignScore})`}${negation}${starFilter}${submissionFilter}`;
+            const bChunkQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${bQuery}`;
+            const pChunkQuery = `(clinvar.gene.symbol:(${geneGroup}) OR dbnsfp.genename:(${geneGroup})) AND ${pQuery}`;
 
             const [bResp, pResp] = await Promise.all([
-              fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bQuery)}&fields=${requestedFields}&size=1000`).then(r => r.ok ? r.json() : { hits: [] }).catch(() => ({ hits: [] })),
-              fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pQuery)}&fields=${requestedFields}&size=1000`).then(r => r.ok ? r.json() : { hits: [] }).catch(() => ({ hits: [] }))
+              fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(bChunkQuery)}&fields=${requestedFields}&size=1000`).then(r => r.ok ? r.json() : { hits: [] }).catch(() => ({ hits: [] })),
+              fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(pChunkQuery)}&fields=${requestedFields}&size=1000`).then(r => r.ok ? r.json() : { hits: [] }).catch(() => ({ hits: [] }))
             ]);
             return [...(bResp.hits || []), ...(pResp.hits || [])];
           } else {
@@ -1044,20 +1166,22 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         processed.push(item);
       }
 
-      // Count variants per gene
+      // Count variants per gene in current response
       const geneVariantCounts = new Map<string, number>();
       for (const v of processed) {
         geneVariantCounts.set(v.gene, (geneVariantCounts.get(v.gene) || 0) + 1);
       }
 
-      // Annotate each variant with its gene's total variant count
+      // Annotate each variant with authoritative gene variant count from facets or current batch
       for (const v of processed) {
-        v.geneVariantCount = geneVariantCounts.get(v.gene) || 1;
+        const facetCount = geneFacetCounts.get(v.gene.toUpperCase());
+        const localCount = geneVariantCounts.get(v.gene) || 0;
+        v.geneVariantCount = (typeof facetCount === 'number' && facetCount > 0) ? facetCount : (localCount || 1);
       }
 
       // Optional gene-level variant frequency filter: only show genes with > minVariantsPerGene variants
       if (minVariantsPerGene > 0) {
-        processed = processed.filter(v => (geneVariantCounts.get(v.gene) || 0) > minVariantsPerGene);
+        processed = processed.filter(v => (v.geneVariantCount || 0) > minVariantsPerGene);
       }
 
       // Compute statistics
@@ -1949,7 +2073,9 @@ function formatGeminiError(err: any): { message: string; statusCode: number } {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
+    const distPath = fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'))
+      ? path.join(process.cwd(), 'dist')
+      : path.join(process.cwd(), 'build');
     app.use(express.static(distPath));
     app.get('*all', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
