@@ -1,6 +1,13 @@
 
 import { Variant, Phenotype, AdvancedSettings } from '../types';
 
+export interface VariantResidueAnnotations {
+  ptms?: { category: string; description: string; color?: string; badge?: string }[];
+  sites?: { category: string; label: string; name: string; description: string; ligand?: string; color?: string }[];
+  interfaces?: { partnerSymbol: string; fullName?: string; bioGridCount: number; pdbIds: string[] }[];
+  domains?: { name: string; color?: string }[];
+}
+
 export const generateExperimentalPlan = async (
   humanGene: string,
   yeastGene: string,
@@ -15,7 +22,8 @@ export const generateExperimentalPlan = async (
     percentIdentity?: number;
     percentSimilarity?: number;
   },
-  structureImage?: string | null
+  structureImage?: string | null,
+  annotationsMap?: Map<number, VariantResidueAnnotations>
 ): Promise<void> => {
   
   const phenoText = phenotypes.map(p => 
@@ -28,12 +36,69 @@ export const generateExperimentalPlan = async (
   if (selectedVariants && selectedVariants.length > 0) {
     variantContext += `\n\n*** FOCUS ANALYSIS ON SELECTED VARIANT(S): ***`;
     selectedVariants.forEach((sv, idx) => {
-        variantContext += `\n[Variant ${idx + 1}] Human ${sv.proteinChange} (Ref: ${sv.refAA} -> Mut: ${sv.targetAA}) which maps to Yeast Residue ${sv.yeastAA} at position ${sv.yeastPos}.`;
+        const resNum = Number(sv.residue);
+        const annot = (!isNaN(resNum) && annotationsMap) ? annotationsMap.get(resNum) : undefined;
+
+        variantContext += `\n[Variant ${idx + 1}] Human ${sv.proteinChange} (Ref: ${sv.refAA} -> Mut: ${sv.targetAA}) which maps to Yeast Residue ${sv.yeastAA} at position ${sv.yeastPos} (Human Residue #${resNum}).`;
         if (sv.localHomologyScore !== undefined) {
           variantContext += `\n   - Local Homology Score: ${sv.localHomologyScore}% (Percent of identical/similar residues in a 13-aa window centered on variant).`;
         }
         if (sv.amScore !== null && sv.amScore !== undefined) {
           variantContext += `\n   - AlphaMissense Score: ${sv.amScore} (Scale 0-1. Interpret context: <0.34 Likely Benign, 0.34-0.56 Ambiguous, >0.56 Likely Pathogenic).`;
+        }
+        if (sv.clinicalSignificance) {
+          variantContext += `\n   - ClinVar Clinical Significance: ${sv.clinicalSignificance}${sv.clinVarStars !== undefined ? ` (${sv.clinVarStars}★ Stars)` : ''}.`;
+        }
+
+        // Additional variant table Site, Domain, PTM, and Interface information at the variant position
+        if (annot) {
+          // 1. Protein Domains
+          if (annot.domains && annot.domains.length > 0) {
+            const domainNames = annot.domains.map(d => d.name).join(', ');
+            variantContext += `\n   - Protein Domain at Position ${resNum}: ${domainNames}`;
+          } else {
+            variantContext += `\n   - Protein Domain at Position ${resNum}: None explicitly assigned (inter-domain loop / unstructured region)`;
+          }
+
+          // 2. Functional Sites & Motifs
+          if (annot.sites && annot.sites.length > 0) {
+            const siteDescriptions = annot.sites.map(s => {
+              let label = s.name;
+              if (s.category === 'ACTIVE_SITE') label = `Active Site (${s.name})`;
+              else if (s.category === 'METAL_BINDING') label = `Metal Binding: ${s.ligand || s.name}`;
+              else if (s.category === 'BINDING_SITE') label = `Binding Site: ${s.ligand || s.name}`;
+              else if (s.category === 'SLIM_MOTIF') label = `SLiM Motif: ${s.label || s.name}`;
+              
+              if (s.description && s.description !== s.name) {
+                label += ` - ${s.description}`;
+              }
+              return label;
+            }).join('; ');
+            variantContext += `\n   - Functional Site(s) at Position ${resNum}: ${siteDescriptions}`;
+          } else {
+            variantContext += `\n   - Functional Site(s) at Position ${resNum}: None specifically annotated`;
+          }
+
+          // 3. Post-Translational Modifications (PTMs)
+          if (annot.ptms && annot.ptms.length > 0) {
+            const ptmDescriptions = annot.ptms.map(p => {
+              return p.description ? `${p.category} (${p.description})` : p.category;
+            }).join('; ');
+            variantContext += `\n   - Post-Translational Modification(s) (PTM) at Position ${resNum}: ${ptmDescriptions}`;
+          }
+
+          // 4. 3D Contact Interfaces
+          if (annot.interfaces && annot.interfaces.length > 0) {
+            const intfDescriptions = annot.interfaces.map(i => {
+              const partner = i.partnerSymbol === 'Homomer (Self)' ? 'Homomer (Self-interaction)' : i.partnerSymbol;
+              let desc = `Interface with ${partner}`;
+              if (i.fullName) desc += ` (${i.fullName})`;
+              if (i.bioGridCount > 0) desc += ` [${i.bioGridCount} BioGRID physical interaction reports]`;
+              if (i.pdbIds && i.pdbIds.length > 0) desc += ` [PDB structures: ${i.pdbIds.slice(0, 3).join(', ')}]`;
+              return desc;
+            }).join('; ');
+            variantContext += `\n   - 3D Contact Interface(s) at Position ${resNum}: ${intfDescriptions}`;
+          }
         }
     });
   } else {
@@ -126,13 +191,13 @@ const prompt = `
     ### 1. GENE FUNCTION & UTILITY ASSESSMENT
     * **Human & Yeast Function:** Briefly summarize the human gene's function. In the next paragraph, concisely describe the yeast gene's function (noting if it is essential).
     * **Modeling Utility:** **Bold your assessment** of the utility of modeling this human variant in yeast. Base this strictly on protein identity/similarity, local homology, DIOPT score (Note: DIOPT of 1 is very low), and structural image data (if provided). If the data suggests poor conservation, explicitly advise against using the yeast model. Mention if literature indicates the human gene successfully complements the yeast null mutant.
-    * **Variant Assessment:** Perform a web search on the specific variant of unknown significance (VUS). Summarize any found primary literature. If no literature is found, state this clearly. Conclude with a brief hypothesized impact of the VUS based on the AlphaMissense score and structural data. 
+    * **Variant Assessment:** Perform a web search on the specific variant of unknown significance (VUS). Summarize any found primary literature. If no literature is found, state this clearly. Conclude with a hypothesized impact of the VUS based on the AlphaMissense score, structural data, and the provided **Site and Domain annotations at the variant position** (evaluate if the mutation disrupts an annotated catalytic active site, metal/ligand-binding pocket, SLiM motif, post-translational modification, 3D interaction interface, or critical protein domain). 
     * **Rare Disease Context:** If your search associates the variant with a rare disease, briefly explain the disease in lay terms.
 
     ---
     ### 2. EXPERIMENTAL ASSAY PROPOSAL
     * **Methodology:** Exclusively propose assays evaluating the CRISPR-mediated knock-in of the variant at the native yeast locus. 
-    * **Assay Design:** Select the most appropriate assay based on the Safety Constraints and Lab Context provided. ${phenotypeInstructions ? ` ${phenotypeInstructions}` : ' You MUST preferentially select "classical genetics" phenotypes over "large-scale survey" phenotypes.'}
+    * **Assay Design:** Select the most appropriate assay based on the Safety Constraints and Lab Context provided. ${phenotypeInstructions ? ` ${phenotypeInstructions}` : ' You MUST preferentially select "classical genetics" phenotypes over "large-scale survey" phenotypes.'} Integrate the variant's site and domain context (e.g., active site, interaction interface, ligand-binding, or PTM site) into your rationale for why the chosen phenotypic readout or assay conditions are mechanistically appropriate.
     * **Specific Conditions:** If web search revealed specific chemical agents, ions, or conditions related to the phenotype, explicitly state them and cite the source paper inline. Explicitly state the source reference for the chosen phenotype (e.g., "Based on Smith et al., 2010").
 
     ---
@@ -144,7 +209,7 @@ const prompt = `
     ### 4. EXECUTIVE SUMMARY (TL;DR)
     Provide a 4-5 bullet point summary.
     * Bullet 1: The assessment of modeling utility in yeast.
-    * Bullet 2: The predicted impact of the VUS on protein function.
+    * Bullet 2: The predicted impact of the VUS on protein function, highlighting any affected functional site, domain, PTM, or interaction interface.
     * Bullets 3-5: Key takeaways regarding the assay and expected outcomes.
 
     ---

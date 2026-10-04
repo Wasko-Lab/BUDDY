@@ -1913,13 +1913,14 @@ export const App: React.FC = () => {
           selectedVariants, 
           selectedPhenotype,
           settings.ai,
-          // New Argument: Conservation Metrics
+          // Conservation Metrics
           {
             dioptScore: ortholog.score,
             percentIdentity: alignment?.percentIdentity,
             percentSimilarity: alignment?.percentSimilarity
           },
-          structureImage
+          structureImage,
+          residueAnnotationsMap
       );
       addLog("AI Plan generated successfully.");
     } catch (err) {
