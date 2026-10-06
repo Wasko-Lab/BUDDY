@@ -40,7 +40,7 @@ export const AlignmentView: React.FC<Props> = ({
 }) => {
   const LINE_WIDTH = 60;
   const containerRef = useRef<HTMLDivElement>(null);
-  const [useBoxshade, setUseBoxshade] = useState(false);
+  const [useBoxshade, setUseBoxshade] = useState(true);
   
   // Domains state: Selectable, default OFF
   const [showDomains, setShowDomains] = useState(false);
@@ -1639,10 +1639,23 @@ export const AlignmentView: React.FC<Props> = ({
 
               {/* Match Line */}
               {!useBoxshade && (
-                  <div className="flex h-5 items-center">
-                       <span className={LABEL_CLS}></span>
+                  <div className="flex h-5 items-center select-none font-mono">
+                       <span className={`${LABEL_CLS} text-slate-400 dark:text-slate-600 text-[11px]`} title="Sequence Identity & Similarity Match (| = identical, : = similar)"></span>
                        <span className={INDEX_CLS}></span>
-                       <span className={`${SEQ_CLS} text-teal-600 font-bold`}>{chunk.matchLine}</span>
+                       <span className={`${SEQ_CLS} text-teal-600 dark:text-teal-400 font-bold flex items-center`}>
+                           {chunk.matchLine.split('').map((char, i) => {
+                               const isHighlight = chunk.highlightIndicesH.includes(i);
+                               return (
+                                   <span 
+                                       key={i} 
+                                       className={`inline-block w-[1ch] min-w-[1ch] max-w-[1ch] text-center overflow-hidden leading-none ${char === '|' ? 'text-teal-600 dark:text-teal-400 font-black' : char === ':' ? 'text-teal-500/80 dark:text-teal-300 font-bold' : ''} ${isHighlight ? 'bg-emerald-900/30' : ''}`}
+                                   >
+                                       {char}
+                                   </span>
+                               );
+                           })}
+                       </span>
+                       <span className="w-8 ml-2"></span>
                   </div>
               )}
 
