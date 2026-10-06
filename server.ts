@@ -435,6 +435,26 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
     }
   });
 
+  // Proxy /api/alliance/search
+  // Searches genes using the official Alliance of Genome Resources (AGR) API
+  app.get('/api/alliance/search', async (req, res) => {
+    try {
+      const { q, species = 'Saccharomyces cerevisiae', limit = '50' } = req.query as { q?: string; species?: string; limit?: string };
+      if (!q) return res.status(400).json({ error: "Missing query parameter 'q'" });
+
+      const url = `https://www.alliancegenome.org/api/search?q=${encodeURIComponent(q)}&category=gene_search_result&species=${encodeURIComponent(species)}&limit=${encodeURIComponent(limit)}`;
+      const response = await fetch(url);
+      if (!response.ok) {
+        return res.status(response.status).json({ error: "Alliance Genome search API failed" });
+      }
+      const data = await response.json();
+      return res.json(data);
+    } catch (e: any) {
+      console.warn("Alliance Genome search proxy error:", e);
+      return res.status(500).json({ error: e.message || "Failed to search Alliance Genome" });
+    }
+  });
+
   // Proxy /api/alliancemine/sequence (Alliance of Genome Resources AllianceMine backup for yeast sequence)
   app.get('/api/alliancemine/sequence', async (req, res) => {
     try {
@@ -747,14 +767,32 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
     if (!discType) return null;
     if (requestedType !== 'ALL' && discType !== requestedType) return null;
 
-    // HGVS protein
-    let pChange = clin?.hgvs?.protein;
-    if (Array.isArray(pChange)) pChange = pChange[0];
-    if (!pChange) {
-      let dbHgvs = dbnsfp?.hgvsp || h.dbnsfp?.hgvsp;
-      if (Array.isArray(dbHgvs)) dbHgvs = dbHgvs[0];
-      if (dbHgvs) pChange = dbHgvs;
+    // HGVS protein: prioritize ClinVar official preferred_name (e.g. "NM_... (p.Lys715Thr)")
+    // and dbnsfp.hgvsp which maps directly to the canonical UniProt protein sequence
+    let pChange = '';
+    for (const r of rcvs) {
+      if (r?.preferred_name) {
+        const m = String(r.preferred_name).match(/\((p\.[A-Za-z0-9_]+)\)/);
+        if (m) { pChange = m[1]; break; }
+        const m2 = String(r.preferred_name).match(/p\.[A-Z][a-z]{2}\d+[A-Z][a-z]{2}/);
+        if (m2) { pChange = m2[0]; break; }
+      }
     }
+
+    if (!pChange) {
+      const dbHgvs = dbnsfp?.hgvsp || h.dbnsfp?.hgvsp;
+      const dbList = (Array.isArray(dbHgvs) ? dbHgvs : [dbHgvs]).filter(Boolean);
+      const match3 = dbList.find((s: string) => /p\.[A-Z][a-z]{2}\d+[A-Z][a-z]{2}/.test(s));
+      if (match3) pChange = match3;
+      else if (dbList.length > 0) pChange = dbList[0];
+    }
+
+    if (!pChange) {
+      const clProt = clin?.hgvs?.protein;
+      const clList = (Array.isArray(clProt) ? clProt : [clProt]).filter(Boolean);
+      if (clList.length > 0) pChange = clList[0];
+    }
+
     if (!pChange) pChange = clin?.variant_id ? `Variant ${clin.variant_id}` : 'p.?';
     let cleanHgvs = pChange;
     const hgvsMatch = cleanHgvs.match(/p\.([A-Z][a-z]{2}\d+[A-Z][a-z]{2})/);
@@ -2073,9 +2111,7 @@ function formatGeminiError(err: any): { message: string; statusCode: number } {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = fs.existsSync(path.join(process.cwd(), 'dist', 'index.html'))
-      ? path.join(process.cwd(), 'dist')
-      : path.join(process.cwd(), 'build');
+    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*all', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));

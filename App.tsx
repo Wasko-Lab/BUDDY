@@ -1,10 +1,10 @@
 
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Search, Dna, Activity, Zap, FileText, AlertCircle, PlayCircle, Key, Settings, ExternalLink, Info, List, ArrowRight, Sparkles, Filter, FlaskConical, Copy, Download, HelpCircle, ChevronDown, Mail, Shuffle, BookOpen, X, Printer, Loader2, FilePlus, PenTool, Sliders, ChevronLeft, ChevronRight, Sun, Moon, RefreshCw, Link2, Star, Users, Check, Scale, Network, Target, Layers } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { GeneInfo, OrthologInfo, Variant, Phenotype, PipelineState, AlignmentResult, RepairResult, Cas9Site, AdvancedSettings, ProteinDomain, ProteinPtm, FunctionalSite, ProteinInterfaceData } from './types';
 import { getHumanGeneInfo, getOrtholog, fetchSequence, fetchClinVarVariants, fetchYeastPhenotypes, searchGenes, searchGenesByAi, fetchYeastGeneSequence, getSgdId, fetchProteinDomains, fetchProteinPtms, fetchFunctionalSites, fetchProteinInterfaces, fetchGnomadV4GeneVariants, GnomadV4Variant } from './services/api';
-import { alignSequences, parseProteinChange, isSimilarAA, AA_MAP, calculateLocalHomology } from './utils/alignment';
+import { alignSequences, parseProteinChange, resolveClinVarProteinChange, isSimilarAA, AA_MAP, calculateLocalHomology } from './utils/alignment';
 import { findCas9Sites, generateRepairTemplates, reverseComplement, getMutationIndex } from './utils/crispr';
 import { generateExperimentalPlan } from './services/geminiService';
 import { AlignmentView } from './components/AlignmentView';
@@ -428,6 +428,14 @@ export const App: React.FC = () => {
   const [variantSortDirection, setVariantSortDirection] = useState<'asc' | 'desc'>('desc');
   const [isAnnotationsLoading, setIsAnnotationsLoading] = useState(false);
 
+  const addLog = useCallback((msg: string) => {
+    setState(prev => ({ ...prev, logs: [...prev.logs, msg] }));
+  }, []);
+
+  const handleError = useCallback((msg: string) => {
+    setState(prev => ({ ...prev, step: 'error', error: msg, logs: [...prev.logs, `Error: ${msg}`] }));
+  }, []);
+
   // Dedicated helper to fetch protein domains, PTMs, functional sites, and interfaces
   const loadProteinAnnotations = async (targetGeneInfo: GeneInfo) => {
     if (!targetGeneInfo?.uniprot_id && !targetGeneInfo?.symbol) return;
@@ -435,20 +443,43 @@ export const App: React.FC = () => {
     const symFallback = targetGeneInfo.symbol || undefined;
 
     setIsAnnotationsLoading(true);
+    addLog(`Loading protein annotations for ${targetGeneInfo.symbol} (BioGRID physical interactions, PDBe-KB 3D contacts, UniProt domains, PTMs, functional sites)...`);
+
     try {
       const [domsRes, ptmsRes, sitesRes, intfRes] = await Promise.allSettled([
-        fetchProteinDomains(idToQuery, 'human', symFallback),
-        fetchProteinPtms(idToQuery, 'human', symFallback),
-        fetchFunctionalSites(idToQuery, 'human', symFallback),
-        fetchProteinInterfaces(targetGeneInfo.symbol, targetGeneInfo.uniprot_id)
+        fetchProteinDomains(idToQuery, 'human', symFallback).then(res => {
+          addLog(`UniProt/Pfam: Loaded ${(res || []).length} protein domains for ${targetGeneInfo.symbol}.`);
+          return res;
+        }),
+        fetchProteinPtms(idToQuery, 'human', symFallback).then(res => {
+          addLog(`UniProt: Loaded ${(res || []).length} post-translational modifications (PTMs) for ${targetGeneInfo.symbol}.`);
+          return res;
+        }),
+        fetchFunctionalSites(idToQuery, 'human', symFallback).then(res => {
+          addLog(`UniProt/ELM: Loaded ${(res || []).length} functional/catalytic sites & SLiM motifs for ${targetGeneInfo.symbol}.`);
+          return res;
+        }),
+        fetchProteinInterfaces(targetGeneInfo.symbol, targetGeneInfo.uniprot_id).then(res => {
+          const resCount = res?.interfaceResidues?.length || 0;
+          const partnerCount = res?.interfacePartners?.length || 0;
+          const bgCount = res?.partners?.length || 0;
+          if (resCount > 0 || partnerCount > 0 || bgCount > 0) {
+            addLog(`BioGRID & PDBe-KB: Loaded ${resCount} 3D interface contact residues across ${partnerCount} complexes (${bgCount} physical partners) for ${targetGeneInfo.symbol}.`);
+          } else {
+            addLog(`BioGRID & PDBe-KB: No 3D structural interface contacts found for ${targetGeneInfo.symbol}.`);
+          }
+          return res;
+        })
       ]);
 
       if (domsRes.status === 'fulfilled') setProteinDomains(domsRes.value || []);
       if (ptmsRes.status === 'fulfilled') setProteinPtms(ptmsRes.value || []);
       if (sitesRes.status === 'fulfilled') setFunctionalSites(sitesRes.value || []);
       if (intfRes.status === 'fulfilled') setProteinInterfaces(intfRes.value || null);
+      addLog(`Protein annotations and interactions updated for ${targetGeneInfo.symbol}.`);
     } catch (e) {
       console.warn("Error loading protein annotations:", e);
+      addLog(`Note loading protein annotations: ${(e as Error).message || e}`);
     } finally {
       setIsAnnotationsLoading(false);
     }
@@ -690,14 +721,6 @@ export const App: React.FC = () => {
         clearTimeout(disappearTimer);
     };
   }, [showSettings]);
-
-  const addLog = (msg: string) => {
-    setState(prev => ({ ...prev, logs: [...prev.logs, msg] }));
-  };
-
-  const handleError = (msg: string) => {
-    setState(prev => ({ ...prev, step: 'error', error: msg, logs: [...prev.logs, `Error: ${msg}`] }));
-  };
 
   const handleSearch = async () => {
     if (inputMode === 'manual') return;
@@ -960,7 +983,7 @@ export const App: React.FC = () => {
 
            // 2. Fetch Yeast Info
            const yeastHits = await searchGenes(trimmedDualYeastInput, 'yeast');
-           if (yeastHits.length === 0) throw new Error(`Yeast gene '${trimmedDualYeastInput}' not found in MyGene.info or YeastMine.`);
+           if (yeastHits.length === 0) throw new Error(`Yeast gene '${trimmedDualYeastInput}' not found in MyGene.info or Alliance Genome.`);
            const upperDual = trimmedDualYeastInput.toUpperCase();
            const bestYeast = yeastHits.find((h: any) => 
                h.symbol?.toUpperCase() === upperDual || 
@@ -980,7 +1003,7 @@ export const App: React.FC = () => {
           // Manual Entry mode set to Yeast
           addLog(`Searching for Yeast gene: ${inputTerm}...`);
           const yeastHits = await searchGenes(inputTerm, 'yeast');
-          if (yeastHits.length === 0) throw new Error(`Yeast gene '${inputTerm}' not found in MyGene.info or YeastMine.`);
+          if (yeastHits.length === 0) throw new Error(`Yeast gene '${inputTerm}' not found in MyGene.info or Alliance Genome.`);
           
           const upperInput = inputTerm.toUpperCase();
           const bestYeast = yeastHits.find((h: any) => 
@@ -1377,94 +1400,91 @@ export const App: React.FC = () => {
              // Handle ClinVar structure (array vs obj)
              let clinVarEntry = hit.clinvar;
              if (Array.isArray(clinVarEntry)) clinVarEntry = clinVarEntry[0];
+             if (!clinVarEntry) continue;
+
+             // Resolve transcript-level protein change matching the canonical human protein sequence
+             const resolved = resolveClinVarProteinChange(hit, humanSeqRecord.seq);
+             if (!resolved) continue;
+
+             const parsed = resolved.parsed;
+             const pChangeStr = resolved.raw;
+             const cleanName = resolved.cleanName;
+
+             // Check Conservation
+             // Map parsed.res (1-based) to alignment index
+             let currentResCount = 0;
+             let alignIndex = -1;
+             for (let i = 0; i < alignRes.aligned1.length; i++) {
+                 if (alignRes.aligned1[i] !== '-') {
+                     currentResCount++;
+                     if (currentResCount === parsed.res) {
+                         alignIndex = i;
+                         break;
+                     }
+                 }
+             }
+
+             if (alignIndex === -1) continue;
+
+             const hChar = alignRes.aligned1[alignIndex];
+             const yChar = alignRes.aligned2[alignIndex];
+
+             // Guard against alternative-isoform residue offsets:
+             // The reference amino acid in the mutation must match the canonical human residue at this position.
+             if (hChar !== parsed.ref) {
+                 continue;
+             }
              
-             const pChange = clinVarEntry?.hgvs?.protein;
-             const pChangeStr = Array.isArray(pChange) ? pChange[0] : pChange;
+             let status: Variant['conservedStatus'] = 'N/A';
+             let yeastAA = '-';
+             let yeastPos = '-';
+             let localScore = 0;
 
-             if (pChangeStr && pChangeStr.includes('p.')) {
-                const parsed = parseProteinChange(pChangeStr);
-                if (parsed) {
-                    // Check Conservation
-                    // Map parsed.res (1-based) to alignment index
-                    let currentResCount = 0;
-                    let alignIndex = -1;
-                    for (let i = 0; i < alignRes.aligned1.length; i++) {
-                        if (alignRes.aligned1[i] !== '-') {
-                            currentResCount++;
-                            if (currentResCount === parsed.res) {
-                                alignIndex = i;
-                                break;
-                            }
-                        }
-                    }
-                    
-                    let status: Variant['conservedStatus'] = 'N/A';
-                    let yeastAA = '-';
-                    let yeastPos = '-';
-                    let localScore = 0;
+             // Calculate Local Homology Score
+             localScore = calculateLocalHomology(alignRes.aligned1, alignRes.aligned2, alignIndex);
 
-                    if (alignIndex !== -1) {
-                        const hChar = alignRes.aligned1[alignIndex];
-                        const yChar = alignRes.aligned2[alignIndex];
-                        
-                        // Calculate Local Homology Score
-                        localScore = calculateLocalHomology(alignRes.aligned1, alignRes.aligned2, alignIndex);
+             if (yChar === '-') {
+                 status = 'Gap';
+             } else {
+                 // Calculate Yeast Pos
+                 let yCount = 0;
+                 for (let k = 0; k <= alignIndex; k++) {
+                     if (alignRes.aligned2[k] !== '-') yCount++;
+                 }
+                 yeastAA = yChar;
+                 yeastPos = yCount.toString();
 
-                        if (yChar === '-') {
-                            status = 'Gap';
-                        } else {
-                            // Calculate Yeast Pos
-                            let yCount = 0;
-                            for(let k=0; k<=alignIndex; k++) {
-                                if (alignRes.aligned2[k] !== '-') yCount++;
-                            }
-                            yeastAA = yChar;
-                            yeastPos = yCount.toString();
+                 if (hChar === yChar) status = 'Identical';
+                 else if (isSimilarAA(hChar, yChar)) status = 'Similar';
+                 else status = 'Mismatch';
+             }
+             
+             // AlphaMissense Score from dbNSFP
+             let amScore: number | null = null;
+             const dbnsfpEntry = Array.isArray(hit.dbnsfp) ? hit.dbnsfp[0] : hit.dbnsfp;
+             if (dbnsfpEntry?.alphamissense?.score) {
+                 const rawScore = dbnsfpEntry.alphamissense.score;
+                 amScore = parseFloat(Array.isArray(rawScore) ? rawScore[0] : rawScore);
+             }
 
-                            if (hChar === yChar) status = 'Identical';
-                            else if (isSimilarAA(hChar, yChar)) status = 'Similar';
-                            else status = 'Mismatch';
-                        }
-                    }
-                    
-                    // AlphaMissense Score from dbNSFP
-                    let amScore: number | null = null;
-                    const dbnsfpEntry = Array.isArray(hit.dbnsfp) ? hit.dbnsfp[0] : hit.dbnsfp;
-                    if (dbnsfpEntry?.alphamissense?.score) {
-                        const rawScore = dbnsfpEntry.alphamissense.score;
-                        amScore = parseFloat(Array.isArray(rawScore) ? rawScore[0] : rawScore);
-                    }
+             // Filtering Logic based on Advanced Settings
+             // 1. Conservation
+             let keep = false;
+             if (status === 'Identical' || status === 'Similar') keep = true;
+             if (settings.filtering.allowMismatches && status === 'Mismatch') keep = true;
+             if (settings.filtering.excludeGaps && status === 'Gap') keep = false;
 
-                    // Filtering Logic based on Advanced Settings
-                    // 1. Conservation
-                    let keep = false;
-                    if (status === 'Identical' || status === 'Similar') keep = true;
-                    if (settings.filtering.allowMismatches && status === 'Mismatch') keep = true;
-                    if (settings.filtering.excludeGaps && status === 'Gap') keep = false;
+             // 1.1 Local Homology Filter
+             if (localScore < settings.filtering.minLocalHomology) keep = false;
 
-                    // 1.1 Local Homology Filter
-                    if (localScore < settings.filtering.minLocalHomology) keep = false;
+             // 1.2 AlphaMissense Score Filter
+             // If user is at default [0.0, 1.0], allow variants even if AlphaMissense score is absent
+             // If user set a custom score range, enforce that amScore must be within [minScore, maxScore]
+             const isDefaultScoreRange = minScore <= 0.0 && maxScore >= 1.0;
+             const passesScore = isDefaultScoreRange ? true : (amScore !== null && amScore >= minScore && amScore <= maxScore);
+             if (!passesScore) keep = false;
 
-                    // 1.2 AlphaMissense Score Filter
-                    // If user is at default [0.0, 1.0], allow variants even if AlphaMissense score is absent
-                    // If user set a custom score range, enforce that amScore must be within [minScore, maxScore]
-                    const isDefaultScoreRange = minScore <= 0.0 && maxScore >= 1.0;
-                    const passesScore = isDefaultScoreRange ? true : (amScore !== null && amScore >= minScore && amScore <= maxScore);
-                    if (!passesScore) keep = false;
-
-                    if (keep) {
-                        let cleanName = pChangeStr;
-                        const hgvsMatch = cleanName.match(/p\.([A-Z][a-z]{2}\d+[A-Z][a-z]{2})/);
-                        
-                        if (hgvsMatch) {
-                            cleanName = hgvsMatch[1];
-                        } else {
-                            if (cleanName.includes(':')) {
-                                cleanName = cleanName.split(':')[1];
-                            }
-                            cleanName = cleanName.replace('p.', '');
-                        }
-
+             if (keep) {
                                 // 2. ClinVar Significance Classification across ALL RCV submissions
                                 let rcvs = clinVarEntry.rcv;
                                 let rcvList: any[] = [];
@@ -1640,8 +1660,6 @@ export const App: React.FC = () => {
                                     clinVarSubmitters: totalSubmitters > 0 ? totalSubmitters : undefined
                                 });
                             }
-                }
-             }
           }
       }
       
@@ -1706,19 +1724,22 @@ export const App: React.FC = () => {
               let conservedStatus: 'Identical' | 'Similar' | 'Mismatch' | 'Gap' | 'N/A' = 'N/A';
 
               if (alignIndex !== -1) {
-                yeastAA = alignRes.yeastSeqAligned[alignIndex];
-                if (yeastAA !== '-') {
-                  let yCount = 0;
-                  for (let i = 0; i <= alignIndex; i++) {
-                    if (alignRes.yeastSeqAligned[i] !== '-') yCount++;
+                const hChar = alignRes.humanSeqAligned[alignIndex];
+                if (hChar === parsed.ref) {
+                  yeastAA = alignRes.yeastSeqAligned[alignIndex];
+                  if (yeastAA !== '-') {
+                    let yCount = 0;
+                    for (let i = 0; i <= alignIndex; i++) {
+                      if (alignRes.yeastSeqAligned[i] !== '-') yCount++;
+                    }
+                    yeastPos = yCount.toString();
+                    if (yeastAA === parsed.ref) conservedStatus = 'Identical';
+                    else if (isSimilarAA(parsed.ref, yeastAA)) conservedStatus = 'Similar';
+                    else conservedStatus = 'Mismatch';
+                  } else {
+                    yeastPos = 'Gap';
+                    conservedStatus = 'Gap';
                   }
-                  yeastPos = yCount.toString();
-                  if (yeastAA === parsed.ref) conservedStatus = 'Identical';
-                  else if (isSimilarAA(parsed.ref, yeastAA)) conservedStatus = 'Similar';
-                  else conservedStatus = 'Mismatch';
-                } else {
-                  yeastPos = 'Gap';
-                  conservedStatus = 'Gap';
                 }
               }
 
@@ -2052,74 +2073,73 @@ export const App: React.FC = () => {
                     const extractVariant = (hit: any) => {
                         let clinVarEntry = hit.clinvar;
                         if (Array.isArray(clinVarEntry)) clinVarEntry = clinVarEntry[0];
-                        const pChange = clinVarEntry?.hgvs?.protein;
-                        const pChangeStr = Array.isArray(pChange) ? pChange[0] : pChange;
-                        if (pChangeStr && pChangeStr.includes('p.')) {
-                            const parsed = parseProteinChange(pChangeStr);
-                            if (parsed) {
-                                let currentResCount = 0;
-                                let alignIndex = -1;
-                                for (let i = 0; i < alignment.humanSeqAligned.length; i++) {
-                                    if (alignment.humanSeqAligned[i] !== '-') currentResCount++;
-                                    if (currentResCount === parsed.res) { alignIndex = i; break; }
+                        if (!clinVarEntry) return null;
+
+                        const unGappedHuman = alignment.humanSeqAligned.replace(/-/g, '');
+                        const resolved = resolveClinVarProteinChange(hit, unGappedHuman);
+                        if (!resolved) return null;
+
+                        const parsed = resolved.parsed;
+                        const pChangeStr = resolved.raw;
+                        const cleanName = resolved.cleanName;
+
+                        let currentResCount = 0;
+                        let alignIndex = -1;
+                        for (let i = 0; i < alignment.humanSeqAligned.length; i++) {
+                            if (alignment.humanSeqAligned[i] !== '-') currentResCount++;
+                            if (currentResCount === parsed.res) { alignIndex = i; break; }
+                        }
+                        if (alignIndex !== -1) {
+                            const hChar = alignment.humanSeqAligned[alignIndex];
+                            if (hChar !== parsed.ref) return null;
+
+                            const yeastAA = alignment.yeastSeqAligned[alignIndex];
+                            if (yeastAA !== '-') {
+                                let yeastResCount = 0;
+                                for (let i = 0; i <= alignIndex; i++) {
+                                    if (alignment.yeastSeqAligned[i] !== '-') yeastResCount++;
                                 }
-                                if (alignIndex !== -1) {
-                                    const yeastAA = alignment.yeastSeqAligned[alignIndex];
-                                    if (yeastAA !== '-') {
-                                        let yeastResCount = 0;
-                                        for (let i = 0; i <= alignIndex; i++) {
-                                            if (alignment.yeastSeqAligned[i] !== '-') yeastResCount++;
-                                        }
-                                        let status: Variant['conservedStatus'] = 'Mismatch';
-                                        if (parsed.ref === yeastAA) status = 'Identical';
-                                        else if (isSimilarAA(parsed.ref, yeastAA)) status = 'Similar';
-                                        
-                                        if ((status === 'Identical' || status === 'Similar') && parsed.target !== yeastAA) {
-                                            let cleanName = pChangeStr;
-                                            const hgvsMatch = cleanName.match(/p\.([A-Z][a-z]{2}\d+[A-Z][a-z]{2})/);
-                                            if (hgvsMatch) cleanName = hgvsMatch[1];
-                                            else {
-                                                if (cleanName.includes(':')) cleanName = cleanName.split(':')[1];
-                                                cleanName = cleanName.replace('p.', '');
-                                            }
-                                            const rcvObj = clinVarEntry.rcv?.[0] || clinVarEntry.rcv;
-                                            const stars = getClinVarStarsFromStatus(rcvObj?.review_status);
-                                            const rcvs = Array.isArray(clinVarEntry.rcv) ? clinVarEntry.rcv : (clinVarEntry.rcv ? [clinVarEntry.rcv] : []);
-                                            let subCount = 0;
-                                            for (const r of rcvs) {
-                                                if (typeof r?.number_submitters === 'number') subCount += r.number_submitters;
-                                                else if (r) subCount += 1;
-                                            }
-                                            if (subCount === 0 && rcvs.length > 0) subCount = rcvs.length;
-
-                                            const ctrlGnomad = extractGnomadData(hit);
-
-                                            return {
-                                                variant: {
-                                                    hgvs: pChangeStr,
-                                                    proteinChange: cleanName,
-                                                    residue: parsed.res,
-                                                    refAA: parsed.ref,
-                                                    targetAA: parsed.target,
-                                                    conservedStatus: status,
-                                                    yeastAA,
-                                                    yeastPos: yeastResCount.toString(),
-                                                    amScore: null,
-                                                    clinVarId: rcvObj?.accession,
-                                                    clinVarVariantId: clinVarEntry.variant_id,
-                                                    gnomadFreq: ctrlGnomad.freq,
-                                                    gnomadLink: ctrlGnomad.link,
-                                                    gnomadLinkV4: ctrlGnomad.linkV4,
-                                                    gnomadDetails: ctrlGnomad.details,
-                                                    clinVarStars: stars,
-                                                    reviewStatus: rcvObj?.review_status || '',
-                                                    clinicalSignificance: type === 'benign' ? 'Benign' : 'Pathogenic',
-                                                    clinVarSubmitters: subCount > 0 ? subCount : undefined
-                                                },
-                                                yeastPos: yeastResCount
-                                            };
-                                        }
+                                let status: Variant['conservedStatus'] = 'Mismatch';
+                                if (parsed.ref === yeastAA) status = 'Identical';
+                                else if (isSimilarAA(parsed.ref, yeastAA)) status = 'Similar';
+                                
+                                if ((status === 'Identical' || status === 'Similar') && parsed.target !== yeastAA) {
+                                    const rcvObj = clinVarEntry.rcv?.[0] || clinVarEntry.rcv;
+                                    const stars = getClinVarStarsFromStatus(rcvObj?.review_status);
+                                    const rcvs = Array.isArray(clinVarEntry.rcv) ? clinVarEntry.rcv : (clinVarEntry.rcv ? [clinVarEntry.rcv] : []);
+                                    let subCount = 0;
+                                    for (const r of rcvs) {
+                                        if (typeof r?.number_submitters === 'number') subCount += r.number_submitters;
+                                        else if (r) subCount += 1;
                                     }
+                                    if (subCount === 0 && rcvs.length > 0) subCount = rcvs.length;
+
+                                    const ctrlGnomad = extractGnomadData(hit);
+
+                                    return {
+                                        variant: {
+                                            hgvs: pChangeStr,
+                                            proteinChange: cleanName,
+                                            residue: parsed.res,
+                                            refAA: parsed.ref,
+                                            targetAA: parsed.target,
+                                            conservedStatus: status,
+                                            yeastAA,
+                                            yeastPos: yeastResCount.toString(),
+                                            amScore: null,
+                                            clinVarId: rcvObj?.accession,
+                                            clinVarVariantId: clinVarEntry.variant_id,
+                                            gnomadFreq: ctrlGnomad.freq,
+                                            gnomadLink: ctrlGnomad.link,
+                                            gnomadLinkV4: ctrlGnomad.linkV4,
+                                            gnomadDetails: ctrlGnomad.details,
+                                            clinVarStars: stars,
+                                            reviewStatus: rcvObj?.review_status || '',
+                                            clinicalSignificance: type === 'benign' ? 'Benign' : 'Pathogenic',
+                                            clinVarSubmitters: subCount > 0 ? subCount : undefined
+                                        },
+                                        yeastPos: yeastResCount
+                                    };
                                 }
                             }
                         }
@@ -4047,6 +4067,7 @@ export const App: React.FC = () => {
                     proteinPtms={proteinPtms}
                     functionalSites={functionalSites}
                     proteinInterfaces={proteinInterfaces}
+                    onAddLog={addLog}
                 />
               )}
 
@@ -4071,6 +4092,7 @@ export const App: React.FC = () => {
                       proteinPtms={proteinPtms}
                       proteinInterfaces={proteinInterfaces}
                       alignmentMap={alignmentMap}
+                      onAddLog={addLog}
                   />
               )}
 
@@ -4213,6 +4235,7 @@ export const App: React.FC = () => {
                                             type="button"
                                             onClick={(e) => {
                                                 e.stopPropagation();
+                                                addLog(`[User Action] Reloading functional sites, PTMs, and interaction interfaces for ${geneInfo.symbol}...`);
                                                 loadProteinAnnotations(geneInfo);
                                             }}
                                             className="p-0.5 text-slate-400 hover:text-emerald-500 rounded transition-colors"
@@ -4397,8 +4420,12 @@ export const App: React.FC = () => {
                                           {annot.ptms.map((ptm, idx) => (
                                               <span
                                                   key={`ptm-${idx}`}
-                                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700"
-                                                  title={`PTM: ${ptm.category} at residue ${v.residue}${ptm.description ? ` (${ptm.description})` : ''}`}
+                                                  onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      addLog(`[Variant ${v.proteinChange}] Post-Translational Modification: ${ptm.category} at residue ${v.residue}${ptm.description ? ` (${ptm.description})` : ''}`);
+                                                  }}
+                                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-amber-100 text-amber-800 dark:bg-amber-950/70 dark:text-amber-300 border border-amber-300 dark:border-amber-700 cursor-pointer hover:bg-amber-200 dark:hover:bg-amber-900 transition-colors"
+                                                  title={`PTM: ${ptm.category} at residue ${v.residue}${ptm.description ? ` (${ptm.description})` : ''} (Click to inspect)`}
                                               >
                                                   <Sparkles className="w-3 h-3 text-amber-600 dark:text-amber-400 shrink-0" />
                                                   <span>{getPtmLabel(ptm.category)}</span>
@@ -4416,8 +4443,12 @@ export const App: React.FC = () => {
                                               return (
                                                   <span
                                                       key={`site-${idx}`}
-                                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-purple-100 text-purple-800 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-300 dark:border-purple-700"
-                                                      title={`${site.name} (${site.category}): ${site.description}${site.ligand ? ` [Ligand: ${site.ligand}]` : ''}`}
+                                                      onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          addLog(`[Variant ${v.proteinChange}] Functional Site: ${site.name} (${site.category}) - ${site.description}${site.ligand ? ` [Ligand: ${site.ligand}]` : ''}`);
+                                                      }}
+                                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-purple-100 text-purple-800 dark:bg-purple-950/70 dark:text-purple-300 border border-purple-300 dark:border-purple-700 cursor-pointer hover:bg-purple-200 dark:hover:bg-purple-900 transition-colors"
+                                                      title={`${site.name} (${site.category}): ${site.description}${site.ligand ? ` [Ligand: ${site.ligand}]` : ''} (Click to inspect)`}
                                                   >
                                                       <Target className="w-3 h-3 text-purple-600 dark:text-purple-400 shrink-0" />
                                                       <span>{label}</span>
@@ -4433,12 +4464,16 @@ export const App: React.FC = () => {
                                                   ? `${intf.partnerSymbol} Interface`
                                                   : `${intf.partnerSymbol} Interaction`;
 
-                                              const tooltip = `3D Contact Interface: ${partnerText}${intf.fullName ? ` (${intf.fullName})` : ''}${intf.bioGridCount > 0 ? ` • ${intf.bioGridCount} BioGRID reports` : ''}${intf.pdbIds.length > 0 ? ` • PDB: ${intf.pdbIds.slice(0, 4).join(', ')}` : ''}`;
+                                              const tooltip = `3D Contact Interface: ${partnerText}${intf.fullName ? ` (${intf.fullName})` : ''}${intf.bioGridCount > 0 ? ` • ${intf.bioGridCount} BioGRID reports` : ''}${intf.pdbIds.length > 0 ? ` • PDB: ${intf.pdbIds.slice(0, 4).join(', ')}` : ''} (Click to inspect)`;
 
                                               return (
                                                   <span
                                                       key={`intf-${idx}`}
-                                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-sky-100 text-sky-800 dark:bg-sky-950/70 dark:text-sky-300 border border-sky-300 dark:border-sky-700"
+                                                      onClick={(e) => {
+                                                          e.stopPropagation();
+                                                          addLog(`[Variant ${v.proteinChange}] 3D Contact Interface: ${partnerText}${intf.fullName ? ` (${intf.fullName})` : ''} - ${intf.bioGridCount} BioGRID physical interaction reports, PDB structures: ${intf.pdbIds.length > 0 ? intf.pdbIds.slice(0, 5).join(', ') : 'AlphaFold structure'}`);
+                                                      }}
+                                                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-semibold bg-sky-100 text-sky-800 dark:bg-sky-950/70 dark:text-sky-300 border border-sky-300 dark:border-sky-700 cursor-pointer hover:bg-sky-200 dark:hover:bg-sky-900 transition-colors"
                                                       title={tooltip}
                                                   >
                                                       <Network className="w-3 h-3 text-sky-600 dark:text-sky-400 shrink-0" />
@@ -4455,8 +4490,12 @@ export const App: React.FC = () => {
                                           {/* Protein Domain (shown as secondary if no PTM/site/intf) */}
                                           {annot.ptms.length === 0 && annot.sites.length === 0 && annot.interfaces.length === 0 && annot.domains.length > 0 && (
                                               <span
-                                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800"
-                                                  title={`Domain: ${annot.domains[0].name}`}
+                                                  onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      addLog(`[Variant ${v.proteinChange}] Protein Domain: ${annot.domains[0].name} at residue ${v.residue}`);
+                                                  }}
+                                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium bg-indigo-50 text-indigo-700 dark:bg-indigo-950/40 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 cursor-pointer hover:bg-indigo-100 dark:hover:bg-indigo-900 transition-colors"
+                                                  title={`Domain: ${annot.domains[0].name} (Click to inspect)`}
                                               >
                                                   <Layers className="w-3 h-3 text-indigo-500 shrink-0" />
                                                   <span className="truncate max-w-[140px]">{annot.domains[0].name}</span>

@@ -30,6 +30,7 @@ interface Props {
   functionalSites?: FunctionalSite[];
   proteinPtms?: ProteinPtm[];
   proteinInterfaces?: ProteinInterfaceData | null;
+  onAddLog?: (msg: string) => void;
 }
 
 type ViewMode = 'human' | 'yeast' | 'overlay';
@@ -51,7 +52,8 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   proteinDomains = [],
   functionalSites = [],
   proteinPtms = [],
-  proteinInterfaces = null
+  proteinInterfaces = null,
+  onAddLog
 }, ref) => {
   const [viewMode, setViewMode] = useState<ViewMode>(initialSpecies);
   const [representation, setRepresentation] = useState<Representation>('cartoon');
@@ -177,14 +179,23 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   const [interfaceColors, setInterfaceColors] = useState<Record<string, string>>({});
 
   const toggleAllInterfaces = () => {
-    setShowAllInterfaces(prev => !prev);
+    setShowAllInterfaces(prev => {
+      const next = !prev;
+      onAddLog?.(`[3D Structure] ${next ? 'Highlighting all 3D interface contacts' : 'Hid 3D interface contacts'}.`);
+      return next;
+    });
   };
 
   const toggleInterfacePartner = (partnerSymbol: string) => {
     setEnabledInterfacePartners(prev => {
       const next = new Set(prev);
-      if (next.has(partnerSymbol)) next.delete(partnerSymbol);
-      else next.add(partnerSymbol);
+      if (next.has(partnerSymbol)) {
+        next.delete(partnerSymbol);
+        onAddLog?.(`[3D Structure] Disabled 3D interface overlay for partner ${partnerSymbol}.`);
+      } else {
+        next.add(partnerSymbol);
+        onAddLog?.(`[3D Structure] Enabled 3D interface overlay for partner ${partnerSymbol}.`);
+      }
       return next;
     });
   };
@@ -193,11 +204,13 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
     setShowAllInterfaces(true);
     const allPartners = (proteinInterfaces?.interfacePartners || []).map(p => p.partnerSymbol);
     setEnabledInterfacePartners(new Set(allPartners));
+    onAddLog?.(`[3D Structure] Enabled all ${allPartners.length} interaction partners in 3D.`);
   };
 
   const disableAllInterfaces = () => {
     setShowAllInterfaces(false);
     setEnabledInterfacePartners(new Set());
+    onAddLog?.(`[3D Structure] Disabled all interface partners in 3D.`);
   };
 
   const setCustomInterfaceColor = (partnerSymbol: string, color: string) => {
@@ -213,6 +226,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
       setShowAllInterfaces(true);
     }
     v.zoomTo({ resi: residues });
+    onAddLog?.(`[3D Structure] Centered camera on ${partnerSymbol || 'selected'} interface contact patch (${residues.length} residues).`);
   };
 
   // 4. 3D Domain Overlays State (default OFF)
@@ -603,6 +617,8 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
     baseCoordsRef.current = null;
     humanCentroidRef.current = null;
 
+    onAddLog?.(`[3D Structure] Querying AlphaFold / RCSB 3D models for ${viewMode === 'overlay' ? `Human (${activeHumanId}) and Yeast (${activeYeastId}) superposition` : `${viewMode} (${viewMode === 'human' ? activeHumanId : activeYeastId})`}...`);
+
     if (!viewerRef.current && containerRef.current && window.$3Dmol) {
         const config = { backgroundColor: '#1e293b' }; // slate-800
         viewerRef.current = window.$3Dmol.createViewer(containerRef.current, config);
@@ -730,9 +746,11 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
 
         v.zoomTo();
         updateRender(); // Apply initial styles
+        onAddLog?.(`[3D Structure] 3D structure loaded and rendered successfully (${viewMode}).`);
 
     } catch (err) {
         setError((err as Error).message);
+        onAddLog?.(`[3D Structure] Note on 3D structure: ${(err as Error).message}`);
     } finally {
         setLoading(false);
     }
@@ -1297,7 +1315,13 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                     {/* Row 1, Col 1: Sites & Motifs */}
                     <button 
                         type="button"
-                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'sites' ? null : 'sites')}
+                        onClick={() => {
+                            const nextTab = activeAnnotationTab === 'sites' ? null : 'sites';
+                            setActiveAnnotationTab(nextTab);
+                            if (nextTab) {
+                                onAddLog?.(`[3D Structure] Switched to Sites & Motifs panel (${functionalSites.length} annotated functional/catalytic sites).`);
+                            }
+                        }}
                         className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             enabledSiteIds.size > 0
                                 ? 'bg-rose-600 text-white border-rose-500 shadow-sm'
@@ -1323,7 +1347,13 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                     {/* Row 1, Col 2: PTMs */}
                     <button 
                         type="button"
-                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'ptms' ? null : 'ptms')}
+                        onClick={() => {
+                            const nextTab = activeAnnotationTab === 'ptms' ? null : 'ptms';
+                            setActiveAnnotationTab(nextTab);
+                            if (nextTab) {
+                                onAddLog?.(`[3D Structure] Switched to PTMs panel (${proteinPtms.length} post-translational modifications).`);
+                            }
+                        }}
                         className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             enabledPtmIds.size > 0
                                 ? 'bg-amber-600 text-white border-amber-500 shadow-sm'
@@ -1349,7 +1379,15 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                     {/* Row 2, Col 1: Interfaces */}
                     <button 
                         type="button"
-                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'interfaces' ? null : 'interfaces')}
+                        onClick={() => {
+                            const nextTab = activeAnnotationTab === 'interfaces' ? null : 'interfaces';
+                            setActiveAnnotationTab(nextTab);
+                            if (nextTab) {
+                                const partners = proteinInterfaces?.interfacePartners?.length || 0;
+                                const resCount = proteinInterfaces?.allInterfaceResidueIndices?.length || 0;
+                                onAddLog?.(`[3D Structure] Switched to Contact Interfaces panel (${partners} partners, ${resCount} 3D contact residues).`);
+                            }
+                        }}
                         className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             showAllInterfaces || enabledInterfacePartners.size > 0
                                 ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
@@ -1379,7 +1417,13 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
                     {/* Row 2, Col 2: Domains */}
                     <button 
                         type="button"
-                        onClick={() => setActiveAnnotationTab(activeAnnotationTab === 'domains' ? null : 'domains')}
+                        onClick={() => {
+                            const nextTab = activeAnnotationTab === 'domains' ? null : 'domains';
+                            setActiveAnnotationTab(nextTab);
+                            if (nextTab) {
+                                onAddLog?.(`[3D Structure] Switched to Domains panel (${proteinDomains.length} structural domains).`);
+                            }
+                        }}
                         className={`px-2 py-0.5 text-[11px] font-bold rounded transition-all flex items-center justify-between gap-1.5 border ${
                             enabledDomainIds.size > 0
                                 ? 'bg-indigo-600 text-white border-indigo-500 shadow-sm'

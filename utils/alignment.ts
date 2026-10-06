@@ -167,16 +167,165 @@ export const AA_MAP: Record<string, string> = {
   'Ter': '*'
 };
 
-export const parseProteinChange = (pChange: string): { ref: string, res: number, target: string } | null => {
-  // Format p.Arg114Gln
-  const regex = /p\.([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2})/;
-  const match = pChange.match(regex);
-  if (match) {
-    return {
-      ref: AA_MAP[match[1]] || '?',
-      res: parseInt(match[2]),
-      target: AA_MAP[match[3]] || '?'
-    };
+export const ONE_TO_THREE_AA: Record<string, string> = {
+  'A': 'Ala', 'R': 'Arg', 'N': 'Asn', 'D': 'Asp', 'C': 'Cys',
+  'Q': 'Gln', 'E': 'Glu', 'G': 'Gly', 'H': 'His', 'I': 'Ile',
+  'L': 'Leu', 'K': 'Lys', 'M': 'Met', 'F': 'Phe', 'P': 'Pro',
+  'S': 'Ser', 'T': 'Thr', 'W': 'Trp', 'Y': 'Tyr', 'V': 'Val',
+  '*': 'Ter'
+};
+
+export interface ParsedProteinChange {
+  ref: string; // 1-letter code, e.g. 'A'
+  res: number; // 1-based position, e.g. 141
+  target: string; // 1-letter code, e.g. 'T'
+  clean3: string; // 3-letter standard, e.g. 'Ala141Thr'
+}
+
+export const parseProteinChange = (pChange: string): ParsedProteinChange | null => {
+  if (!pChange || typeof pChange !== 'string') return null;
+  const str = pChange.trim();
+
+  // Format 1: 3-letter AA, e.g. p.Arg114Gln, Arg114Gln, NP_00123.1:p.Arg114Gln, (p.Arg114Gln)
+  const match3 = str.match(/(?:^|[^a-zA-Z])p?\.?([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2})(?:[^a-zA-Z]|$)/);
+  if (match3) {
+    const ref3 = match3[1];
+    const res = parseInt(match3[2], 10);
+    const tgt3 = match3[3];
+    const ref = AA_MAP[ref3] || '?';
+    const target = AA_MAP[tgt3] || '?';
+    if (!isNaN(res) && res > 0) {
+      return {
+        ref,
+        res,
+        target,
+        clean3: `${ref3}${res}${tgt3}`
+      };
+    }
   }
+
+  // Format 2: 1-letter AA, e.g. p.R114Q, R114Q, p.A141T, NP_...:p.K715T
+  const match1 = str.match(/(?:^|[^a-zA-Z])p?\.?([A-Z])(\d+)([A-Z])(?:[^a-zA-Z]|$)/);
+  if (match1 && match1[1] !== match1[3]) {
+    const ref = match1[1];
+    const res = parseInt(match1[2], 10);
+    const target = match1[3];
+    const ref3 = ONE_TO_THREE_AA[ref] || ref;
+    const tgt3 = ONE_TO_THREE_AA[target] || target;
+    if (!isNaN(res) && res > 0) {
+      return {
+        ref,
+        res,
+        target,
+        clean3: `${ref3}${res}${tgt3}`
+      };
+    }
+  }
+
   return null;
 };
+
+export interface ResolvedClinVarProteinChange {
+  raw: string; // Selected raw HGVS string, e.g. "NP_056281.1:p.Lys715Thr" or "NM_... (p.Ala136Thr)"
+  cleanName: string; // e.g. "Ala136Thr"
+  parsed: ParsedProteinChange;
+  isSeqMatch: boolean; // Whether canonicalSeq[parsed.res - 1] === parsed.ref
+  source: 'preferred_name' | 'clinvar_hgvs' | 'dbnsfp_hgvsp' | 'fallback';
+}
+
+/**
+ * Robustly resolves a ClinVar hit to the transcript/isoform protein change
+ * that accurately matches the canonical protein sequence (UniProt).
+ * 
+ * Prevents transcript-isoform residue offset bugs (e.g. where an alternative transcript
+ * displays Ala171Thr, but canonical sequence has K at 171 and the actual mutation is Ala136Thr / Ala141Thr).
+ */
+export const resolveClinVarProteinChange = (
+  hit: any,
+  canonicalSeq?: string
+): ResolvedClinVarProteinChange | null => {
+  if (!hit) return null;
+  const clinVarEntry = Array.isArray(hit.clinvar) ? hit.clinvar[0] : hit.clinvar;
+  const rcvs = Array.isArray(clinVarEntry?.rcv) ? clinVarEntry.rcv : (clinVarEntry?.rcv ? [clinVarEntry.rcv] : []);
+
+  const candidateMap = new Map<string, { raw: string; parsed: ParsedProteinChange; source: 'preferred_name' | 'clinvar_hgvs' | 'dbnsfp_hgvsp' }>();
+
+  const addCandidate = (str: any, source: 'preferred_name' | 'clinvar_hgvs' | 'dbnsfp_hgvsp') => {
+    if (!str || typeof str !== 'string') return;
+    const trimmed = str.trim();
+    if (!trimmed || trimmed === 'p.?' || candidateMap.has(trimmed)) return;
+    const parsed = parseProteinChange(trimmed);
+    if (!parsed) return;
+    candidateMap.set(trimmed, { raw: trimmed, parsed, source });
+  };
+
+  // 1. RCV preferred_names (primary authoritative clinical transcript selected by ClinVar / MANE Select)
+  for (const r of rcvs) {
+    if (r?.preferred_name) {
+      addCandidate(r.preferred_name, 'preferred_name');
+      const m = String(r.preferred_name).match(/\((p\.[^\)]+)\)/);
+      if (m) addCandidate(m[1], 'preferred_name');
+    }
+  }
+
+  // 2. clinvar.hgvs.protein (all transcript-level RefSeq/Ensembl HGVS expressions)
+  const clProt = clinVarEntry?.hgvs?.protein;
+  const clProtList = (Array.isArray(clProt) ? clProt : [clProt]).filter(Boolean);
+  for (const p of clProtList) {
+    addCandidate(p, 'clinvar_hgvs');
+  }
+
+  // 3. dbnsfp.hgvsp (dbNSFP is computed directly against canonical UniProt sequences)
+  const dbnsfpEntry = Array.isArray(hit.dbnsfp) ? hit.dbnsfp[0] : hit.dbnsfp;
+  const dbProt = dbnsfpEntry?.hgvsp;
+  const dbProtList = (Array.isArray(dbProt) ? dbProt : [dbProt]).filter(Boolean);
+  for (const p of dbProtList) {
+    addCandidate(p, 'dbnsfp_hgvsp');
+  }
+
+  const allCandidates = Array.from(candidateMap.values());
+  if (allCandidates.length === 0) return null;
+
+  // Evaluate each candidate against the canonical protein sequence
+  const scored = allCandidates.map(c => {
+    const isSeqMatch = !!(
+      canonicalSeq &&
+      c.parsed.res >= 1 &&
+      c.parsed.res <= canonicalSeq.length &&
+      canonicalSeq[c.parsed.res - 1] === c.parsed.ref
+    );
+
+    let score = 0;
+    if (isSeqMatch) {
+      // Prioritize candidates that match the displayed canonical protein sequence
+      if (c.source === 'preferred_name') score = 1000;
+      else if (c.source === 'clinvar_hgvs') score = 800;
+      else if (c.source === 'dbnsfp_hgvsp') score = 600;
+      else score = 500;
+    } else {
+      // Fallback ranking if no sequence match (e.g. sequence not provided or unique splice variant)
+      if (c.source === 'preferred_name') score = 300;
+      else if (c.source === 'clinvar_hgvs') score = 200;
+      else if (c.source === 'dbnsfp_hgvsp') score = 100;
+    }
+
+    // Secondary heuristic: prefer 3-letter HGVS notation
+    if (c.raw.includes('p.') && /[a-z]{2}/.test(c.raw)) score += 10;
+    // Prefer RefSeq curated NP_ transcript if available in clinvar_hgvs
+    if (c.raw.startsWith('NP_')) score += 5;
+
+    return { ...c, isSeqMatch, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  const best = scored[0];
+
+  return {
+    raw: best.raw,
+    cleanName: best.parsed.clean3,
+    parsed: best.parsed,
+    isSeqMatch: best.isSeqMatch,
+    source: best.source
+  };
+};
+

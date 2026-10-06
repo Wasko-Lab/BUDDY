@@ -99,10 +99,33 @@ export const generateExperimentalPlan = async (
             }).join('; ');
             variantContext += `\n   - 3D Contact Interface(s) at Position ${resNum}: ${intfDescriptions}`;
           }
+        } else if (annotationsMap && annotationsMap.size > 0) {
+          variantContext += `\n   - Protein Domain at Position ${resNum}: None explicitly assigned (inter-domain loop / unstructured region)`;
+          variantContext += `\n   - Functional Site(s) at Position ${resNum}: None specifically annotated`;
         }
     });
   } else {
     variantContext += `\nNo specific variant selected; provide a general approach for the most conserved variants.`;
+    const conserved = variants.filter(v => v.conservedStatus === 'Identical').slice(0, 5);
+    if (conserved.length > 0 && annotationsMap && annotationsMap.size > 0) {
+      variantContext += `\n\nTop candidate conserved variants with site & domain context:`;
+      conserved.forEach((cv) => {
+        const resNum = Number(cv.residue);
+        const annot = !isNaN(resNum) ? annotationsMap.get(resNum) : undefined;
+        const details: string[] = [];
+        if (annot?.domains && annot.domains.length > 0) {
+          details.push(`Domain: ${annot.domains.map(d => d.name).join(', ')}`);
+        }
+        if (annot?.sites && annot.sites.length > 0) {
+          details.push(`Site: ${annot.sites.map(s => s.name).join(', ')}`);
+        }
+        if (annot?.interfaces && annot.interfaces.length > 0) {
+          details.push(`Interface: ${annot.interfaces.map(i => i.partnerSymbol).join(', ')}`);
+        }
+        const extra = details.length > 0 ? ` (${details.join('; ')})` : '';
+        variantContext += `\n   - ${cv.proteinChange} at Human #${resNum} / Yeast ${cv.yeastAA}${cv.yeastPos}${extra}`;
+      });
+    }
   }
 
 

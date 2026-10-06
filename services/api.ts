@@ -64,43 +64,105 @@ export const getHumanGeneInfo = async (symbol: string): Promise<GeneInfo> => {
   };
 };
 
-// --- YeastMine Helper ---
-// Fallback for broad topics (e.g. "Aging", "Cancer") that MyGene.info might miss in Yeast
-const searchYeastMine = async (term: string): Promise<any[]> => {
+// --- Alliance of Genome Resources (AGR) Yeast Gene Search ---
+// Primary fallback for broad biological topics (e.g. "Aging", "Vacuole", "Autophagy") in Yeast
+const searchYeastAlliance = async (term: string): Promise<any[]> => {
   try {
-    const url = `https://yeastmine.yeastgenome.org/yeastmine/service/search?q=${encodeURIComponent(term)}&cat=Gene&species=Saccharomyces%20cerevisiae&format=json`;
-    const response = await fetch(url);
-    if (!response.ok) return [];
-    
-    const data = await response.json();
-    if (!data.results) return [];
+    const cleanTerm = term.trim();
+    if (!cleanTerm) return [];
 
-    // Extract Locus Tags (e.g. YDR001C)
-    // We filter for standard ORF names (Y or Q followed by alphanumeric) to ensure quality hits
-    const locusTags = data.results
-        .map((r: any) => r.fields?.primaryIdentifier)
-        .filter((id: any) => typeof id === 'string' && /^[YQ][A-Z0-9]{6}[A-Z0-9]?$/.test(id))
-        .slice(0, 25);
-    
-    if (locusTags.length === 0) return [];
+    // Strategy 1: Server proxy route /api/alliance/search
+    let data: any = null;
+    try {
+      const proxyRes = await fetch(`/api/alliance/search?q=${encodeURIComponent(cleanTerm)}&species=${encodeURIComponent('Saccharomyces cerevisiae')}&limit=50`);
+      if (proxyRes.ok) {
+        data = await proxyRes.json();
+      }
+    } catch (proxyErr) {
+      console.warn("Server proxy for Alliance search failed, trying direct query:", proxyErr);
+    }
 
-    // Resolve to Entrez via MyGene batch query
-    const mgUrl = `https://mygene.info/v3/query?q=${locusTags.join(',')}&scopes=locus_tag&species=4932&fields=symbol,name,entrezgene,uniprot,locus_tag`;
-    const mgResp = await fetch(mgUrl);
-    const mgData = await mgResp.json();
-    
-    // Ensure array
-    const hits = Array.isArray(mgData) ? mgData : [];
+    // Strategy 2: Direct call to Alliance of Genome Resources search API
+    if (!data || !data.results) {
+      const url = `https://www.alliancegenome.org/api/search?q=${encodeURIComponent(cleanTerm)}&category=gene_search_result&species=Saccharomyces%20cerevisiae&limit=50`;
+      const response = await fetch(url);
+      if (response.ok) {
+        data = await response.json();
+      }
+    }
 
-    return hits.map((hit: any) => ({
-      symbol: hit.symbol || hit.locus_tag || hit.query,
-      name: hit.name || 'Yeast Gene',
-      entrez_id: hit.entrezgene?.toString(),
-      hasUniprot: !!hit.uniprot
-    })).filter((g: any) => g.entrez_id);
+    if (!data || !data.results || !Array.isArray(data.results) || data.results.length === 0) {
+      return [];
+    }
 
+    const mappedGenes: any[] = [];
+    const missingEntrez: string[] = [];
+
+    for (const r of data.results) {
+      const symbol = r.symbol || r.systematicName;
+      if (!symbol) continue;
+
+      let entrezId: string | null = null;
+      let hasUniprot = false;
+
+      if (Array.isArray(r.crossReferences)) {
+        for (const xref of r.crossReferences) {
+          if (typeof xref === 'string') {
+            if (xref.startsWith('NCBI_Gene:')) {
+              entrezId = xref.replace('NCBI_Gene:', '').trim();
+            } else if (xref.startsWith('UniProtKB:')) {
+              hasUniprot = true;
+            }
+          }
+        }
+      }
+
+      const locusTag = r.systematicName || null;
+      const name = r.geneDescription || r.automatedGeneDescription || r.name || 'Yeast Gene';
+
+      if (entrezId) {
+        mappedGenes.push({
+          symbol,
+          name,
+          entrez_id: entrezId,
+          locus_tag: locusTag,
+          hasUniprot,
+          type_of_gene: r.soTermName === 'protein_coding_gene' ? 'protein-coding' : r.soTermName
+        });
+      } else {
+        missingEntrez.push(locusTag || symbol);
+      }
+    }
+
+    // Resolve any hits lacking an NCBI_Gene cross-reference in batch via MyGene
+    if (missingEntrez.length > 0 && mappedGenes.length < 25) {
+      try {
+        const mgUrl = `https://mygene.info/v3/query?q=${encodeURIComponent(missingEntrez.slice(0, 25).join(','))}&scopes=symbol,locus_tag&species=4932,559292&fields=symbol,name,entrezgene,uniprot,locus_tag,type_of_gene`;
+        const mgResp = await fetch(mgUrl);
+        if (mgResp.ok) {
+          const mgData = await mgResp.json();
+          const hits = Array.isArray(mgData) ? mgData : [];
+          for (const hit of hits) {
+            if (hit.entrezgene && !mappedGenes.some(g => g.entrez_id === hit.entrezgene.toString())) {
+              mappedGenes.push({
+                symbol: hit.symbol || hit.locus_tag || hit.query,
+                name: hit.name || 'Yeast Gene',
+                entrez_id: hit.entrezgene.toString(),
+                locus_tag: hit.locus_tag || null,
+                hasUniprot: !!hit.uniprot,
+                type_of_gene: hit.type_of_gene
+              });
+            }
+          }
+        }
+      } catch (mgErr) {
+        console.warn("MyGene fallback lookup for Alliance genes failed", mgErr);
+      }
+    }
+
+    return mappedGenes;
   } catch (e) {
-    console.warn("YeastMine search failed", e);
+    console.warn("Alliance of Genome Resources yeast search failed", e);
     return [];
   }
 };
@@ -228,11 +290,11 @@ export const searchGenes = async (term: string, species: 'human' | 'yeast' = 'hu
        data = await response.json();
   }
 
-  // Strategy 5: YeastMine Fallback (SGD)
-  // If we are searching yeast and still have no hits, try YeastMine directly.
-  // This is crucial for broad terms like "Aging" or "Cancer" which are well-indexed in SGD but may not be in MyGene summaries.
+  // Strategy 5: Alliance of Genome Resources (AGR) Fallback
+  // If we are searching yeast and still have no hits, query Alliance Genome directly.
+  // This is crucial for broad terms like "Aging", "Vacuole", or "Autophagy" that may not match standard MyGene symbols.
   if (species === 'yeast' && (!data.hits || data.hits.length === 0)) {
-      const yeastHits = await searchYeastMine(term);
+      const yeastHits = await searchYeastAlliance(term);
       if (yeastHits.length > 0) {
           return yeastHits;
       }

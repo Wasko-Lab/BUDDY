@@ -19,6 +19,7 @@ interface Props {
   proteinPtms?: ProteinPtm[];
   functionalSites?: FunctionalSite[];
   proteinInterfaces?: ProteinInterfaceData | null;
+  onAddLog?: (msg: string) => void;
 }
 
 export const AlignmentView: React.FC<Props> = ({ 
@@ -34,7 +35,8 @@ export const AlignmentView: React.FC<Props> = ({
   proteinDomains,
   proteinPtms,
   functionalSites,
-  proteinInterfaces
+  proteinInterfaces,
+  onAddLog
 }) => {
   const LINE_WIDTH = 60;
   const containerRef = useRef<HTMLDivElement>(null);
@@ -129,13 +131,21 @@ export const AlignmentView: React.FC<Props> = ({
 
     let isMounted = true;
     setLoadingInterfaces(true);
+    onAddLog?.(`[Alignment] Querying BioGRID & PDBe-KB for physical interaction partners and 3D contact interface residues (${querySymbol || queryUniProt})...`);
     fetchProteinInterfaces(querySymbol, queryUniProt)
       .then(data => {
         if (isMounted && data) {
           setInterfacesData(data);
+          const count = data.interfaceResidues?.length || 0;
+          const partners = data.interfacePartners?.length || 0;
+          const bgCount = data.partners?.length || 0;
+          onAddLog?.(`[Alignment] Loaded protein interfaces: ${count} 3D contact residues across ${partners} structural complexes (${bgCount} physical partners from BioGRID & PDBe-KB).`);
         }
       })
-      .catch(e => console.warn("Failed to fetch protein interfaces in AlignmentView:", e))
+      .catch(e => {
+        console.warn("Failed to fetch protein interfaces in AlignmentView:", e);
+        onAddLog?.(`[Alignment] Note: Could not load 3D contact interfaces: ${(e as Error).message || e}`);
+      })
       .finally(() => {
         if (isMounted) setLoadingInterfaces(false);
       });
@@ -624,7 +634,19 @@ export const AlignmentView: React.FC<Props> = ({
               {/* Protein Domains Toggle: Selectable, Default OFF */}
               <button 
                   type="button"
-                  onClick={() => setShowDomains(!showDomains)}
+                  onClick={() => {
+                    const next = !showDomains;
+                    setShowDomains(next);
+                    if (next) {
+                      if (loadingDomains) {
+                        onAddLog?.(`[Alignment] Querying UniProt & Pfam for protein domain architecture (${humanName})...`);
+                      } else {
+                        onAddLog?.(`[Alignment] Protein Domains enabled: ${domains.length} structural domains displayed.`);
+                      }
+                    } else {
+                      onAddLog?.(`[Alignment] Protein Domains overlay disabled.`);
+                    }
+                  }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border transition-all ${
                     showDomains 
                       ? 'bg-indigo-50 text-indigo-700 border-indigo-300 dark:bg-indigo-950/70 dark:text-indigo-300 dark:border-indigo-700 shadow-xs' 
@@ -644,7 +666,19 @@ export const AlignmentView: React.FC<Props> = ({
               {/* Functional Sites Toggle: Active sites, Metal/Ligand binding, SLiMs (Selectable, Default OFF) */}
               <button 
                   type="button"
-                  onClick={() => setShowSites(!showSites)}
+                  onClick={() => {
+                    const next = !showSites;
+                    setShowSites(next);
+                    if (next) {
+                      if (loadingSites) {
+                        onAddLog?.(`[Alignment] Querying UniProt & ELM for functional sites, catalytic residues, and SLiM motifs (${humanName})...`);
+                      } else {
+                        onAddLog?.(`[Alignment] Functional Sites enabled: ${humanSites.length} annotated sites/motifs displayed.`);
+                      }
+                    } else {
+                      onAddLog?.(`[Alignment] Functional Sites overlay disabled.`);
+                    }
+                  }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border transition-all ${
                     showSites 
                       ? 'bg-purple-50 text-purple-800 border-purple-300 dark:bg-purple-950/70 dark:text-purple-300 dark:border-purple-700 shadow-xs ring-1 ring-purple-400/50' 
@@ -664,7 +698,19 @@ export const AlignmentView: React.FC<Props> = ({
               {/* Post-Translational Modifications (PTM) Toggle: Selectable, Default OFF */}
               <button 
                   type="button"
-                  onClick={() => setShowPtms(!showPtms)}
+                  onClick={() => {
+                    const next = !showPtms;
+                    setShowPtms(next);
+                    if (next) {
+                      if (loadingPtms) {
+                        onAddLog?.(`[Alignment] Querying UniProt for post-translational modifications (${humanName})...`);
+                      } else {
+                        onAddLog?.(`[Alignment] PTMs enabled: ${humanPtms.length} post-translational modifications displayed.`);
+                      }
+                    } else {
+                      onAddLog?.(`[Alignment] PTM overlay disabled.`);
+                    }
+                  }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border transition-all ${
                     showPtms 
                       ? 'bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/70 dark:text-amber-300 dark:border-amber-700 shadow-xs ring-1 ring-amber-400/50' 
@@ -684,7 +730,24 @@ export const AlignmentView: React.FC<Props> = ({
               {/* BioGRID & PDBe-KB Structural Interfaces Toggle: Selectable, Default OFF */}
               <button 
                   type="button"
-                  onClick={() => setShowInterfaces(!showInterfaces)}
+                  onClick={() => {
+                    const next = !showInterfaces;
+                    setShowInterfaces(next);
+                    if (next) {
+                      if (loadingInterfaces) {
+                        onAddLog?.(`[Alignment] Querying BioGRID & PDBe-KB for physical interaction partners and 3D contact interface residues (${humanName})...`);
+                      } else if (interfacesData) {
+                        const count = interfacesData.interfaceResidues?.length || 0;
+                        const partners = interfacesData.interfacePartners?.length || 0;
+                        const bgCount = interfacesData.partners?.length || 0;
+                        onAddLog?.(`[Alignment] Interfaces enabled: ${count} 3D contact residues across ${partners} structural complexes (${bgCount} physical partners from BioGRID & PDBe-KB).`);
+                      } else {
+                        onAddLog?.(`[Alignment] Interfaces overlay enabled for ${humanName}.`);
+                      }
+                    } else {
+                      onAddLog?.(`[Alignment] Interfaces overlay disabled.`);
+                    }
+                  }}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-bold border transition-all ${
                     showInterfaces 
                       ? 'bg-sky-50 text-sky-800 border-sky-300 dark:bg-sky-950/70 dark:text-sky-300 dark:border-sky-700 shadow-xs ring-1 ring-sky-400/50' 
@@ -1037,7 +1100,11 @@ export const AlignmentView: React.FC<Props> = ({
               <div className="flex flex-wrap items-center gap-1">
                 <button
                   type="button"
-                  onClick={() => { setSelectedInterfacePartner(null); setSelectedPartnerDetail(null); }}
+                  onClick={() => { 
+                    setSelectedInterfacePartner(null); 
+                    setSelectedPartnerDetail(null); 
+                    onAddLog?.(`[Alignment] Displaying all ${totalInterfaceResiduesCount} interface contact residues across complexes.`);
+                  }}
                   className={`px-2 py-0.5 rounded text-xs font-bold border transition-all ${
                     selectedInterfacePartner === null
                       ? 'bg-sky-600 text-white border-sky-600 shadow-xs'
@@ -1057,10 +1124,12 @@ export const AlignmentView: React.FC<Props> = ({
                         if (isPartnerSelected) {
                           setSelectedInterfacePartner(null);
                           setSelectedPartnerDetail(null);
+                          onAddLog?.(`[Alignment] Cleared interface partner filter.`);
                         } else {
                           setSelectedInterfacePartner(partner.partnerSymbol);
                           setSelectedPartnerDetail(partner);
                           setSelectedInterfaceResidue(null);
+                          onAddLog?.(`[Alignment] Filtered interface to partner ${partner.partnerSymbol}${partner.partnerFullName ? ` (${partner.partnerFullName})` : ''}: ${partner.residueCount} contact residues, ${partner.bioGridCount} BioGRID interactions.`);
                         }
                       }}
                       className={`px-2 py-0.5 rounded text-xs font-medium border flex items-center gap-1 transition-all ${
