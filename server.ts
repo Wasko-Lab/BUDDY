@@ -3205,10 +3205,8 @@ function formatGeminiError(err: any): { message: string; statusCode: number } {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get(['/VUS', '/VUS/*', '/vus', '/vus/*'], (req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-    app.get('*all', (req, res) => {
+    // SPA catch-all fallback for any unhandled GET route (including /VUS, /vus, etc.)
+    app.use((req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

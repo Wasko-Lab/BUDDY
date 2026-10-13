@@ -624,7 +624,7 @@ export const AlignmentView: React.FC<Props> = ({
           <div>
               <h3 className={`font-bold text-slate-900 flex items-center gap-2 ${!useBoxshade ? 'dark:text-slate-200' : ''}`}>
                 <span>Sequence Alignment</span>
-                <span className="text-slate-400 font-normal text-xs">(v = variant, * = multiple variants)</span>
+                <span className="text-slate-400 font-normal text-xs">(* = multiple variants)</span>
               </h3>
               <div className={`text-[10px] font-normal text-emerald-600 mt-0.5 ${!useBoxshade ? 'dark:text-emerald-500' : ''}`}>
                   Tip: Click on a variant symbol, residue, domain, PTM badge, functional site, or interface to inspect details.
@@ -1486,7 +1486,7 @@ export const AlignmentView: React.FC<Props> = ({
               <div className="flex h-5 items-center my-0.5 select-none font-mono">
                   <span className={`${LABEL_CLS} font-bold text-red-600 dark:text-red-400 flex items-center gap-1`} title="ClinVar Variants & VUS Mutations (v = single variant, * = multiple variants, or substituted amino acid)">
                       <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-pulse"></span>
-                      VUS / Var
+                      VUS/Var
                   </span>
                   <span className={INDEX_CLS}></span>
                   <span className={`${SEQ_CLS} text-red-600 font-bold ${!useBoxshade ? 'dark:text-red-400' : ''}`}>

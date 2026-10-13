@@ -180,10 +180,10 @@ MANDATORY INSTRUCTION FOR ALL SECTIONS:
   let phenotypeInstructions = "";
 
   if (safetyLevel === 'CLASSROOM_SAFE') {
-      safetyInstructions = `SAFETY CONSTRAINT: STRICT CLASSROOM SAFETY. Do not suggest assays involving highly toxic chemicals (e.g. Cadmium, Methotrexate, Cycloheximide) unless necessary and handleable with gloves/goggles in a teaching lab (or suggest a safer analog). If a specific toxic chemical is identified from the search task above, suggest a safer alternative if possible, or clearly state safety warnings. Toxicity to yeast is OK, but it should not be highly toxic to humans.`;
+      safetyInstructions = `SAFETY CONSTRAINT: STRICT CLASSROOM SAFETY. Do not suggest assays involving  toxic chemicals (e.g. Cadmium, Methotrexate, Cycloheximide, ZnCl2) unless safer phenotype alternatives do not exist and the chemical is handleable with gloves/goggles in a teaching lab (suggest a safer alternative when possible, such as MgCl2 over ZnCl2 if both sensitivites existed for the phenotype). If a specific toxic chemical is identified from the search task above, suggest a safer alternative phenotype if available, or clearly state safety warnings. Toxicity to yeast is OK, but it should not be highly toxic to humans or the environment.`;
       
       if (selectedPhenotype) {
-          phenotypeInstructions = `You must first evaluate if the selected phenotype "${selectedPhenotype}" (and any specific details found via web search) is practical (easy, cost-effective, safe) for a standard teaching lab. If it is NOT safe or practical, explain why and recommend a better, safer alternative from the phenotype list or a general growth assay. If it IS practical, design the assay for this phenotype.`;
+          phenotypeInstructions = `You must first evaluate if the selected phenotype "${selectedPhenotype}" (and any specific details found via web search) is practical (easy, cost-effective, relatively safe to work with) for a standard teaching lab. If it is NOT safe or practical, explain why and recommend a better, safer alternative from the phenotype list or a general growth assay. If it IS practical, design the assay for this phenotype.`;
       }
   } else {
       // STANDARD Research Lab
@@ -202,7 +202,7 @@ MANDATORY INSTRUCTION FOR ALL SECTIONS:
 
   let imageContext = "";
   if (structureImage) {
-      imageContext = `\n\nATTACHED IMAGE: A snapshot of the 3D protein structure overlay (Human in Grey/Purple, Yeast in Yellow/Red). Use this to assess structural conservation and potential impact of the variant.`;
+      imageContext = `\n\nATTACHED IMAGE: A snapshot of the 3D protein structure overlay (Typically Human protein in Grey w/ human variant residue Purple, Yeast protein in Yellow with variant in Red). Use this to assess structural conservation and potential impact of the variant.`;
   }
 
 const prompt = `
@@ -228,19 +228,19 @@ const prompt = `
     ### 1. GENE FUNCTION & UTILITY ASSESSMENT
     * **Human & Yeast Function:** Briefly summarize the human gene's function. In the next paragraph, concisely describe the yeast gene's function (noting if it is essential).${hasInviablePhenotype ? `
     * **CRITICAL LETHALITY / ESSENTIAL GENE NOTIFICATION:** ${yeastGene} is annotated with an "inviable" phenotype for null/loss-of-function mutants, meaning this gene is essential for viability. You MUST prominently notify the user of this potential issue: if the human variants being modeled are Loss-of-Function (LoF) mutations, haploid CRISPR knock-ins may be LETHAL. Explain that haploid cells may fail to grow or form colonies unless diploid modeling, heterozygous knock-in, or plasmid-shuffle (5-FOA counterselection) complementation strategies are used.` : ''}
-    * **Modeling Utility:** **Bold your assessment** of the utility of modeling this human variant in yeast. Base this strictly on protein identity/similarity, local homology, DIOPT score (Note: DIOPT of 1 is very low), and structural image data (if provided). If the data suggests poor conservation, explicitly advise against using the yeast model. Mention if literature indicates the human gene successfully complements the yeast null mutant.
-    * **Variant Assessment:** Perform a web search on the specific variant of unknown significance (VUS). Summarize any found primary literature. If no literature is found, state this clearly. Conclude with a hypothesized impact of the VUS based on the AlphaMissense score, structural data, and the provided **Site and Domain annotations at the variant position** (evaluate if the mutation disrupts an annotated catalytic active site, metal/ligand-binding pocket, SLiM motif, post-translational modification, 3D interaction interface, or critical protein domain). 
+    * **Modeling Utility:** **Bold your assessment** of the utility of modeling this human variant in yeast. Base this strictly on protein identity/similarity, local homology, DIOPT score (Note: DIOPT of 1 is very low), and 3d structural overlay image data (if provided). If the data suggests poor conservation, explicitly advise against using the yeast model. Mention if literature indicates the human gene successfully complements the yeast null mutant.
+    * **Variant Assessment:** Perform a web search on the specific variant of unknown significance (VUS). Summarize any found primary literature. If no literature is found, state this clearly. Conclude with a hypothesized impact of the VUS based on the AlphaMissense score, structural data including 3D overlay, and the provided **Site and Domain annotations at the variant position** (evaluate if the mutation may disrupt an annotated catalytic active site, metal/ligand-binding pocket, SLiM motif, post-translational modification, 3D interaction interface, or critical protein domain). 
     * **Deep Mutational Scanning (DMS) & High-Throughput Functional Maps:** Perform a grounded web search specifically for deep mutational scanning (DMS) experiments, saturation mutagenesis studies, or MaveDB entries about the human gene ${humanGene} AND the yeast ortholog ${yeastGene} (e.g. humanized yeast complementation DMS screens, saturation genome editing, or yeast DMS libraries/functional maps for ${yeastGene}). If any DMS experiments exist:
       - Cite the published DMS study/dataset (authors, journal/year, or MaveDB ID) for ${humanGene} and/or ${yeastGene}.
       - Note whether this specific variant, the equivalent orthologous codon position in ${yeastGene}, or neighboring conserved residues were tested in the DMS screen and what functional score / loss-of-function effect was observed.
       - Explicitly discuss the potential that the variant has already been modeled in that manner: if solid DMS data exists (either directly for the human variant or comprehensively mapped in the orthologous yeast gene), explain whether prospective single-variant CRISPR modeling is corroborative or redundant; if the variant was absent from the DMS library, uncharacterized, or yielded ambiguous scores, emphasize the high value of targeted prospective yeast modeling.
       - If no DMS experiments exist for either gene, explicitly state that no deep mutational scanning datasets were identified on PubMed or MaveDB for ${humanGene} or ${yeastGene}.
-    * **Rare Disease Context:** If your search associates the variant with a rare disease, briefly explain the disease in lay terms.
+    * **Disease Context:** If your search associates the variant with a rare disease or any disease, briefly explain the disease in lay terms.
 
     ---
     ### 2. EXPERIMENTAL ASSAY PROPOSAL
     * **Methodology:** Exclusively propose assays evaluating the CRISPR-mediated knock-in of the variant at the native yeast locus. ${hasInviablePhenotype ? `Because ${yeastGene} has an inviable phenotype (essential gene), specifically address strain background viability: recommend performing CRISPR knock-ins in a diploid strain (generating a heterozygous variant) followed by tetrad dissection, or utilizing a plasmid shuffle system (pRS316-URA3 wild-type complementation chased by 5-FOA), so that severe LoF mutations can be recovered and scored for lethality/growth defects.` : ''}
-    * **Assay Design:** Select the most appropriate assay based on the Safety Constraints and Lab Context provided. ${phenotypeInstructions ? ` ${phenotypeInstructions}` : ' You MUST preferentially select "classical genetics" phenotypes over "large-scale survey" phenotypes.'} Integrate the variant's site and domain context (e.g., active site, interaction interface, ligand-binding, or PTM site) into your rationale for why the chosen phenotypic readout or assay conditions are mechanistically appropriate.
+    * **Assay Design:** Select the most appropriate assay based on the Safety Constraints and Lab Context provided. ${phenotypeInstructions ? ` ${phenotypeInstructions}` : ' You should preferentially select "classical genetics" phenotypes over "large-scale survey" phenotypes.'} Integrate the variant's site and domain context (e.g., active site, interaction interface, ligand-binding, or PTM site) into your rationale for why the chosen phenotypic readout or assay conditions are mechanistically appropriate.
     * **Specific Conditions:** If web search revealed specific chemical agents, ions, or conditions related to the phenotype, explicitly state them and cite the source paper inline. Explicitly state the source reference for the chosen phenotype (e.g., "Based on Smith et al., 2010").
 
     ---
@@ -259,7 +259,7 @@ const prompt = `
     ---
     ### 5. DISCLAIMER
     End your response with exactly this text: 
-    "Disclaimer: This content is AI-generated. Strongly consider validating phenotype(s) and other provided information using primary literature. All experiments should be reviewed and overseen by a qualified scientist for safety and compliance with environmental health and safety regulations."
+    "Disclaimer: This content is AI-generated. Validate all provided information using primary sources. All experiments should be reviewed and overseen by a qualified scientist for safety and regulatory compliance."
   `;
 
   const MAX_RETRIES = 1;
