@@ -18,7 +18,7 @@ interface Highlight {
 interface Props {
   humanUniprot: string | null;
   yeastUniprot: string | null;
-  initialSpecies?: 'human' | 'yeast';
+  initialSpecies?: 'human' | 'yeast' | 'overlay';
   customHighlights: Highlight[];
   highlightsBySpecies?: {
       human: Highlight[];
@@ -44,7 +44,7 @@ export interface StructureViewerHandle {
 export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({ 
   humanUniprot, 
   yeastUniprot, 
-  initialSpecies = 'human',
+  initialSpecies = 'overlay',
   customHighlights,
   highlightsBySpecies,
   alignmentMap,
@@ -55,7 +55,17 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   proteinInterfaces = null,
   onAddLog
 }, ref) => {
-  const [viewMode, setViewMode] = useState<ViewMode>(initialSpecies);
+  const getInitialViewMode = (): ViewMode => {
+    if (initialSpecies === 'yeast') return 'yeast';
+    if (initialSpecies === 'human') return 'human';
+    if (initialSpecies === 'overlay') return 'overlay';
+    if (humanUniprot && yeastUniprot) return 'overlay';
+    if (humanUniprot) return 'human';
+    if (yeastUniprot) return 'yeast';
+    return 'overlay';
+  };
+
+  const [viewMode, setViewMode] = useState<ViewMode>(getInitialViewMode);
   const [representation, setRepresentation] = useState<Representation>('cartoon');
   const [variantRepresentation, setVariantRepresentation] = useState<Representation>('sphere');
   type FeatureRepresentation = 'cartoon' | 'stick' | 'surface';
@@ -395,6 +405,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   const containerRef = useRef<HTMLDivElement>(null);
   const outerContainerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<any>(null);
+  const loadRequestIdRef = useRef<number>(0);
 
   // Fullscreen State
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -471,7 +482,17 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
       setActiveYeastId(yeastUniprot);
       setHumanInput(humanUniprot || '');
       setYeastInput(yeastUniprot || '');
-  }, [humanUniprot, yeastUniprot]);
+      // When initialSpecies is overlay, keep overlay mode active while IDs resolve
+      if (initialSpecies === 'overlay') {
+          if (viewMode !== 'overlay') setViewMode('overlay');
+      } else if (humanUniprot && yeastUniprot && initialSpecies !== 'yeast' && initialSpecies !== 'human') {
+          setViewMode('overlay');
+      } else if (!yeastUniprot && humanUniprot && viewMode === 'overlay' && initialSpecies === 'human') {
+          setViewMode('human');
+      } else if (!humanUniprot && yeastUniprot && viewMode === 'overlay' && initialSpecies === 'yeast') {
+          setViewMode('yeast');
+      }
+  }, [humanUniprot, yeastUniprot, initialSpecies]);
 
   // Determine which highlights to use based on current viewMode
   const activeHighlights = useMemo(() => {
@@ -609,6 +630,7 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
   };
 
   const loadStructure = async () => {
+    const requestId = ++loadRequestIdRef.current;
     setLoading(true);
     setError(null);
     setStructureInfo(null);
@@ -616,8 +638,6 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
     setManualAdj({ tx: 0, ty: 0, tz: 0, rx: 0, ry: 0, rz: 0 });
     baseCoordsRef.current = null;
     humanCentroidRef.current = null;
-
-    onAddLog?.(`[3D Structure] Querying AlphaFold / RCSB 3D models for ${viewMode === 'overlay' ? `Human (${activeHumanId}) and Yeast (${activeYeastId}) superposition` : `${viewMode} (${viewMode === 'human' ? activeHumanId : activeYeastId})`}...`);
 
     if (!viewerRef.current && containerRef.current && window.$3Dmol) {
         const config = { backgroundColor: '#1e293b' }; // slate-800
@@ -629,17 +649,24 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
         setLoading(false);
         return;
     }
-    
-    v.clear();
 
     try {
         if (viewMode === 'overlay') {
-            if (!activeHumanId || !activeYeastId) throw new Error("Both Human and Yeast IDs are required for overlay.");
-            
+            if (!activeHumanId || !activeYeastId) {
+                // If one of the species IDs is still resolving in the pipeline, wait for both rather than erroring or loading single
+                setLoading(true);
+                return;
+            }
+
+            onAddLog?.(`[3D Structure] Querying AlphaFold / RCSB 3D models for Human (${activeHumanId}) and Yeast (${activeYeastId}) superposition...`);
+
             const [humanRes, yeastRes] = await Promise.all([
                 getPdbData(activeHumanId),
                 getPdbData(activeYeastId)
             ]);
+
+            // Abandon if superseded by a newer loadStructure invocation
+            if (requestId !== loadRequestIdRef.current) return;
 
             const humanCA = extractCaCoords(humanRes.data);
             const yeastCA = extractCaCoords(yeastRes.data);
@@ -695,6 +722,10 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
             // Cache matched coordinates for instantaneous on-the-fly algorithm cycling
             overlayMatchedPairsRef.current = { fixed: fixedPoints, moving: movingPoints, isConserved: isConservedFlags };
 
+            // ENSURE VIEWER IS PRISTINE: Clear any existing models before adding the overlay pair
+            if (requestId !== loadRequestIdRef.current) return;
+            v.clear();
+
             // Yeast Model (Fixed)
             const yeastModel = v.addModel(yeastRes.data, "pdb");
             
@@ -734,9 +765,21 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
 
         } else {
             const targetId = viewMode === 'human' ? activeHumanId : activeYeastId;
-            if (!targetId) throw new Error(`No ID for ${viewMode}`);
-            
+            if (!targetId) {
+                setLoading(false);
+                return;
+            }
+
+            onAddLog?.(`[3D Structure] Querying AlphaFold / RCSB 3D model for ${viewMode} (${targetId})...`);
+
             const res = await getPdbData(targetId);
+
+            // Abandon if superseded by a newer loadStructure invocation
+            if (requestId !== loadRequestIdRef.current) return;
+
+            // ENSURE VIEWER IS PRISTINE: Clear any existing models before adding the single model
+            v.clear();
+
             const model = v.addModel(res.data, "pdb");
             
             v.custom_models = { single: model };
@@ -744,15 +787,19 @@ export const StructureViewer = React.forwardRef<StructureViewerHandle, Props>(({
             setStructureInfo({ source: res.source, id: res.id });
         }
 
+        if (requestId !== loadRequestIdRef.current) return;
         v.zoomTo();
         updateRender(); // Apply initial styles
         onAddLog?.(`[3D Structure] 3D structure loaded and rendered successfully (${viewMode}).`);
 
     } catch (err) {
+        if (requestId !== loadRequestIdRef.current) return;
         setError((err as Error).message);
         onAddLog?.(`[3D Structure] Note on 3D structure: ${(err as Error).message}`);
     } finally {
-        setLoading(false);
+        if (requestId === loadRequestIdRef.current) {
+            setLoading(false);
+        }
     }
   };
 

@@ -1,5 +1,5 @@
 
-import { GeneInfo, OrthologInfo, SequenceRecord, Variant, Phenotype, CodingExon, DiscordantSearchResult, DiscordantVariant, ProteinDomain, ProteinPtm, FunctionalSite, ProteinInterfaceData } from '../types';
+import { GeneInfo, OrthologInfo, SequenceRecord, Variant, Phenotype, CodingExon, DiscordantSearchResult, DiscordantVariant, ProteinDomain, ProteinPtm, FunctionalSite, ProteinInterfaceData, ProteinComplex, ComplexSearchResult, ComplexVariantRecord, ComplexVariantsResponse, ClinicianSubmissionInput, VariantConservationResult, ClinicianSubmissionRecord, ClinicianModelEvaluationParams, ClinicianModelEvaluationResponse } from '../types';
 import { AA_MAP, parseProteinChange, isSimilarAA } from '../utils/alignment';
 import { orthologs } from '../data/DIOPT_Best2026';
 import summaryTsv from '../data/YeastHuman_Orthologs_Summary.tsv?raw';
@@ -609,39 +609,121 @@ export const fetchYeastGeneSequence = async (geneSymbol: string): Promise<{ sequ
 
 // --- UniProt ---
 export const fetchSequence = async (id: string, isYeast = false): Promise<SequenceRecord> => {
-  let url = `https://rest.uniprot.org/uniprotkb/${id}.fasta`;
+  const cleanId = (id || '').trim();
+  if (!cleanId) {
+    throw new Error('No sequence identifier provided');
+  }
+
+  const isPureNumber = /^\d+$/.test(cleanId);
+  const isSgdId = cleanId.startsWith('SGD:') || /^S\d+$/i.test(cleanId);
+  // UniProt accession format: e.g. P12345, Q9Y261, P43246
+  const isUniProtAcc = /^[OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}$/i.test(cleanId);
   
-  // Special handling for Yeast: supports SGD IDs and Entrez IDs (via search)
+  const urlsToTry: string[] = [];
+
   if (isYeast) {
-    const isSgdId = id.startsWith('SGD:') || /^S\d+$/.test(id);
-    const isEntrezId = /^\d+$/.test(id);
-    
+    if (isUniProtAcc) {
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/${cleanId}.fasta`);
+    }
+
     if (isSgdId) {
-      const cleanId = id.replace('SGD:', '').trim();
-      url = `https://rest.uniprot.org/uniprotkb/search?query=xref:sgd-${cleanId}&format=fasta&size=1`;
-    } else if (isEntrezId) {
-      // Map Entrez Gene ID to UniProt using search
-      // Note: Yeast (S. cerevisiae) taxonomy is 4932 or 559292 (S288C)
-      url = `https://rest.uniprot.org/uniprotkb/search?query=xref:geneid-${id}+AND+organism_id:559292&format=fasta&size=1`;
+      const bareSgd = cleanId.replace(/^SGD:/i, '').trim();
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=xref:sgd-${bareSgd}&format=fasta&size=1`);
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${bareSgd}+AND+organism_id:559292&format=fasta&size=1`);
+    } else if (isPureNumber) {
+      // Yeast Entrez ID (e.g. 854063 for MSH2)
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=xref:geneid-${cleanId}+AND+organism_id:559292&format=fasta&size=1`);
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=xref:geneid-${cleanId}+AND+taxonomy_id:4932&format=fasta&size=1`);
+    } else {
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${cleanId}+AND+organism_id:559292+AND+reviewed:true&format=fasta&size=1`);
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${cleanId}+AND+organism_id:559292&format=fasta&size=1`);
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${cleanId}+AND+taxonomy_id:4932&format=fasta&size=1`);
+    }
+  } else {
+    // Human
+    if (isUniProtAcc) {
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/${cleanId}.fasta`);
+    }
+
+    if (isPureNumber) {
+      // NCBI Entrez Gene ID (e.g. 4436 for MSH2, 7157 for TP53)
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=xref:geneid-${cleanId}+AND+organism_id:9606+AND+reviewed:true&format=fasta&size=1`);
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=xref:geneid-${cleanId}+AND+organism_id:9606&format=fasta&size=1`);
+    } else {
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${cleanId}+AND+organism_id:9606+AND+reviewed:true&format=fasta&size=1`);
+      urlsToTry.push(`https://rest.uniprot.org/uniprotkb/search?query=gene_exact:${cleanId}+AND+organism_id:9606&format=fasta&size=1`);
     }
   }
 
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch sequence for ${id} (Status: ${response.status})`);
-  }
-  
-  const text = await response.text();
-  if (!text || !text.trim()) {
-     throw new Error(`No sequence data returned for ${id}`);
+  let lastStatus = 0;
+  for (const url of urlsToTry) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        lastStatus = response.status;
+        continue;
+      }
+      const text = await response.text();
+      if (!text || !text.trim()) {
+        continue;
+      }
+      const lines = text.trim().split('\n');
+      const description = lines[0];
+      const seq = lines.slice(1).join('').trim();
+      if (seq.length > 0) {
+        return { id: cleanId, description, seq };
+      }
+    } catch (e: any) {
+      console.warn(`Fetch sequence attempt failed for url ${url}:`, e?.message);
+    }
   }
 
-  // Simple fasta parser
-  const lines = text.trim().split('\n');
-  const description = lines[0];
-  const seq = lines.slice(1).join('').trim();
-  
-  return { id, description, seq };
+  // Fallback 1: Resolve UniProt accession via MyGene.info if an ID or symbol was passed
+  try {
+    const mgQueryUrl = isPureNumber
+      ? `https://mygene.info/v3/gene/${cleanId}?fields=uniprot,symbol`
+      : `https://mygene.info/v3/query?q=${encodeURIComponent(cleanId)}&species=${isYeast ? '4932,559292' : '9606'}&fields=uniprot,symbol`;
+    
+    const mgRes = await fetch(mgQueryUrl);
+    if (mgRes.ok) {
+      const mgData = await mgRes.json();
+      const targetHit = isPureNumber ? mgData : (mgData.hits && mgData.hits[0]);
+      let resolvedAcc: string | null = null;
+      if (targetHit?.uniprot) {
+        if (typeof targetHit.uniprot === 'string') {
+          resolvedAcc = targetHit.uniprot;
+        } else if (targetHit.uniprot['Swiss-Prot']) {
+          resolvedAcc = Array.isArray(targetHit.uniprot['Swiss-Prot'])
+            ? targetHit.uniprot['Swiss-Prot'][0]
+            : targetHit.uniprot['Swiss-Prot'];
+        } else if (targetHit.uniprot['TrEMBL']) {
+          resolvedAcc = Array.isArray(targetHit.uniprot['TrEMBL'])
+            ? targetHit.uniprot['TrEMBL'][0]
+            : targetHit.uniprot['TrEMBL'];
+        }
+      }
+
+      if (resolvedAcc) {
+        const fallbackFastUrl = `https://rest.uniprot.org/uniprotkb/${resolvedAcc}.fasta`;
+        const fbRes = await fetch(fallbackFastUrl);
+        if (fbRes.ok) {
+          const fbText = await fbRes.text();
+          if (fbText && fbText.trim()) {
+            const lines = fbText.trim().split('\n');
+            const description = lines[0];
+            const seq = lines.slice(1).join('').trim();
+            if (seq.length > 0) {
+              return { id: resolvedAcc, description, seq };
+            }
+          }
+        }
+      }
+    }
+  } catch (mgErr: any) {
+    console.warn("MyGene fallback lookup in fetchSequence failed:", mgErr?.message);
+  }
+
+  throw new Error(`Failed to fetch sequence for ${id} (Status: ${lastStatus || 404})`);
 };
 
 // --- MyVariant.info ---
@@ -649,15 +731,142 @@ export interface ClinVarQueryOptions {
   excludeUncertain?: boolean;
   excludeConflicting?: boolean;
   minStars?: number;
+  conflictingPathBenignOnly?: boolean;
 }
+
+export interface ClinVarConflictResolution {
+  variantId: string;
+  hasPathogenic: boolean;
+  hasLikelyPathogenic: boolean;
+  hasBenign: boolean;
+  hasLikelyBenign: boolean;
+  hasVus: boolean;
+  isPathBenignConflict: boolean;
+  classifications: string[];
+}
+
+const conflictResolutionCache = new Map<string, ClinVarConflictResolution>();
+
+/**
+ * Resolves individual submitter clinical classifications for ClinVar Variation IDs
+ * via NCBI ClinVar Variation Archive (VCV) XML.
+ * Accurately determines if a conflicting variant has entries as BOTH
+ * (Pathogenic OR Likely Pathogenic) AND (Benign OR Likely Benign),
+ * strictly separating major clinical conflicts from benign + VUS conflicts.
+ */
+export const resolveClinVarConflictingSubmissions = async (
+  variantIds: (number | string)[]
+): Promise<Map<string, ClinVarConflictResolution>> => {
+  const results = new Map<string, ClinVarConflictResolution>();
+  if (!variantIds || variantIds.length === 0) return results;
+
+  const toFetch: string[] = [];
+  for (const rawId of variantIds) {
+    const idStr = String(rawId).trim();
+    if (!idStr) continue;
+    if (conflictResolutionCache.has(idStr)) {
+      results.set(idStr, conflictResolutionCache.get(idStr)!);
+    } else {
+      toFetch.push(idStr);
+    }
+  }
+
+  if (toFetch.length === 0) return results;
+
+  // Batch in chunks of 25 to avoid URL length constraints while maximizing speed
+  const chunkSize = 25;
+  for (let i = 0; i < toFetch.length; i += chunkSize) {
+    const chunk = toFetch.slice(i, i + chunkSize);
+    try {
+      const vcvIds = chunk.map(id => `VCV${id.padStart(9, '0')}`).join(',');
+      const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=clinvar&rettype=vcv&id=${vcvIds}`;
+      const res = await fetch(url);
+      if (!res.ok) continue;
+      const text = await res.text();
+      const archives = text.match(/<VariationArchive[^>]*>[\s\S]*?<\/VariationArchive>/g) || [];
+      for (const arch of archives) {
+        const idMatch = arch.match(/VariationID="(\d+)"/);
+        if (!idMatch) continue;
+        const varId = idMatch[1];
+        const classifications = [...arch.matchAll(/<Classification[^>]*>[\s\S]*?<GermlineClassification[^>]*>([^<]+)<\/GermlineClassification>/g)]
+          .map(m => m[1].toLowerCase().trim());
+
+        const hasExactPathogenic = classifications.some(c => (c === 'pathogenic' || c.startsWith('pathogenic') || c === 'pathogenic/likely pathogenic') && !c.startsWith('likely pathogenic'));
+        const hasLikelyPathogenic = classifications.some(c => c.includes('likely pathogenic'));
+        const hasExactBenign = classifications.some(c => (c === 'benign' || c.startsWith('benign') || c === 'benign/likely benign') && !c.startsWith('likely benign'));
+        const hasLikelyBenign = classifications.some(c => c.includes('likely benign'));
+        const hasVus = classifications.some(c => c.includes('uncertain'));
+
+        const hasPathogenicAssertion = hasExactPathogenic || hasLikelyPathogenic;
+        const hasBenignAssertion = hasExactBenign || hasLikelyBenign;
+        const isPathBenignConflict = hasPathogenicAssertion && hasBenignAssertion;
+
+        const record: ClinVarConflictResolution = {
+          variantId: varId,
+          hasPathogenic: hasExactPathogenic,
+          hasLikelyPathogenic,
+          hasBenign: hasExactBenign,
+          hasLikelyBenign,
+          hasVus,
+          isPathBenignConflict,
+          classifications
+        };
+        conflictResolutionCache.set(varId, record);
+        results.set(varId, record);
+      }
+    } catch (e) {
+      console.warn('[resolveClinVarConflictingSubmissions] Batch query error:', e);
+    }
+  }
+
+  return results;
+};
 
 export const fetchClinVarVariants = async (
   geneSymbol: string, 
   significanceTerms: string[] = [],
   options: ClinVarQueryOptions = {}
 ): Promise<any[]> => {
+  // If user requests conflicting variants with BOTH Pathogenic and Benign submissions:
+  if (options.conflictingPathBenignOnly) {
+    const fields = 'clinvar,dbsnp,dbnsfp,gnomad_exome,gnomad_genome,hg19,hg38';
+    // 1. Direct multi-RCV hits where both Pathogenic and Benign appear across RCV entries
+    const directQuery = `clinvar.gene.symbol:${geneSymbol} AND (clinvar.rcv.clinical_significance:"Pathogenic" OR clinvar.rcv.clinical_significance:"Likely pathogenic") AND (clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign")`;
+    // 2. Conflicting interpretations hits to resolve via NCBI VCV submission records
+    const conflictQuery = `clinvar.gene.symbol:${geneSymbol} AND clinvar.rcv.clinical_significance:"Conflicting interpretations of pathogenicity"`;
+
+    try {
+      const [directRes, conflictRes] = await Promise.all([
+        fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(directQuery)}&fields=${fields}&size=500`).then(r => r.json()).catch(() => ({ hits: [] })),
+        fetch(`https://myvariant.info/v1/query?q=${encodeURIComponent(conflictQuery)}&fields=${fields}&size=200`).then(r => r.json()).catch(() => ({ hits: [] }))
+      ]);
+
+      const directHits = directRes?.hits || [];
+      const conflictHits = conflictRes?.hits || [];
+
+      // Extract variant IDs from conflict hits to resolve via NCBI VCV assertions
+      const conflictIds = conflictHits.map((h: any) => h.clinvar?.variant_id).filter(Boolean);
+      const resolvedMap = await resolveClinVarConflictingSubmissions(conflictIds);
+
+      const hitsMap = new Map<string, any>();
+      for (const h of directHits) {
+        if (h?._id) hitsMap.set(h._id, h);
+      }
+      for (const h of conflictHits) {
+        const vid = String(h.clinvar?.variant_id || '');
+        const resolution = resolvedMap.get(vid);
+        if (resolution?.isPathBenignConflict) {
+          h._conflictResolution = resolution;
+          if (h?._id) hitsMap.set(h._id, h);
+        }
+      }
+      return Array.from(hitsMap.values());
+    } catch (err) {
+      console.warn('[fetchClinVarVariants] conflictingPathBenignOnly fetch error:', err);
+    }
+  }
+
   // Request clinvar, dbsnp AND dbnsfp (for AlphaMissense scores), and gnomAD data
-  // Default to VUS if no terms provided
   let sigQuery = "";
   if (significanceTerms.length > 0) {
     sigQuery = `(${significanceTerms.map(s => `clinvar.rcv.clinical_significance:"${s}"`).join(" OR ")})`;
@@ -665,16 +874,18 @@ export const fetchClinVarVariants = async (
     sigQuery = `clinvar.rcv.clinical_significance:"Uncertain significance"`;
   }
 
-  // If uncertain is not requested or explicitly excluded, strictly negate it from MyVariant query
-  const shouldExcludeUncertain = options.excludeUncertain ?? (!significanceTerms.some(s => s.toLowerCase().includes('uncertain')));
-  if (shouldExcludeUncertain) {
-    sigQuery += ` AND -clinvar.rcv.clinical_significance:"Uncertain significance"`;
-  }
+  // If uncertain is not requested or explicitly excluded, strictly negate it from MyVariant query (unless in conflictingPathBenignOnly mode)
+  if (!options.conflictingPathBenignOnly) {
+    const shouldExcludeUncertain = options.excludeUncertain ?? (!significanceTerms.some(s => s.toLowerCase().includes('uncertain')));
+    if (shouldExcludeUncertain) {
+      sigQuery += ` AND -clinvar.rcv.clinical_significance:"Uncertain significance"`;
+    }
 
-  // If conflicting is not requested or explicitly excluded, negate it as well
-  const shouldExcludeConflicting = options.excludeConflicting ?? (!significanceTerms.some(s => s.toLowerCase().includes('conflicting')));
-  if (shouldExcludeConflicting) {
-    sigQuery += ` AND -clinvar.rcv.clinical_significance:"Conflicting interpretations of pathogenicity" AND -clinvar.clinical_significance:"Conflicting interpretations of pathogenicity" AND -clinvar.rcv.review_status:"criteria provided, conflicting interpretations"`;
+    // If conflicting is not requested or explicitly excluded, negate it as well
+    const shouldExcludeConflicting = options.excludeConflicting ?? (!significanceTerms.some(s => s.toLowerCase().includes('conflicting')));
+    if (shouldExcludeConflicting) {
+      sigQuery += ` AND -clinvar.rcv.clinical_significance:"Conflicting interpretations of pathogenicity" AND -clinvar.clinical_significance:"Conflicting interpretations of pathogenicity" AND -clinvar.rcv.review_status:"criteria provided, conflicting interpretations"`;
+    }
   }
 
   // Filter by ClinVar Review Status / Gold Stars if requested
@@ -704,6 +915,199 @@ export const fetchClinVarVariants = async (
   const response = await fetch(url);
   const data = await response.json();
   return data.hits || [];
+};
+
+/**
+ * Fetches all ClinVar variants across all clinical significance classifications
+ * (Pathogenic, Likely Pathogenic, VUS, Conflicting, Likely Benign, Benign)
+ * along with AlphaMissense (dbNSFP) scores and gnomAD frequencies.
+ * 
+ * Partitions queries across clinical classifications and runs them in parallel.
+ * This prevents high-count categories (like Pathogenic or Conflicting interpretations)
+ * from consuming Elasticsearch's 1,000-hit per-query limit and starving out Benign,
+ * Likely Benign, or VUS variants in well-studied genes with thousands of entries (e.g., MSH2, TP53, BRCA1).
+ */
+export const fetchAllClinVarVariants = async (geneSymbol: string): Promise<any[]> => {
+  const fields = 'clinvar,dbsnp,dbnsfp,gnomad_exome,gnomad_genome,hg19,hg38';
+  
+  const queryTier = async (termQuery: string, size = 1000): Promise<any[]> => {
+    try {
+      const q = `clinvar.gene.symbol:${geneSymbol} AND ${termQuery}`;
+      const url = `https://myvariant.info/v1/query?q=${encodeURIComponent(q)}&fields=${fields}&size=${size}`;
+      const response = await fetch(url);
+      if (!response.ok) return [];
+      const data = await response.json();
+      return data.hits || [];
+    } catch (e) {
+      console.warn(`[fetchAllClinVarVariants] Tier query failed for ${termQuery}:`, e);
+      return [];
+    }
+  };
+
+  const results = await Promise.all([
+    queryTier('(clinvar.rcv.clinical_significance:"Pathogenic" OR clinvar.rcv.clinical_significance:"Likely pathogenic")'),
+    queryTier('(clinvar.rcv.clinical_significance:"Benign" OR clinvar.rcv.clinical_significance:"Likely benign")'),
+    queryTier('clinvar.rcv.clinical_significance:"Uncertain significance"'),
+    queryTier('clinvar.rcv.clinical_significance:"Conflicting interpretations of pathogenicity"')
+  ]);
+
+  const seenIds = new Set<string>();
+  const merged: any[] = [];
+  for (const tierHits of results) {
+    for (const hit of tierHits) {
+      if (hit?._id && !seenIds.has(hit._id)) {
+        seenIds.add(hit._id);
+        merged.push(hit);
+      }
+    }
+  }
+  return merged;
+};
+
+/**
+ * Directly looks up a specific variant residue position in a gene to retrieve
+ * its exact AlphaMissense score, AlphaMissense prediction, ClinVar clinical significance,
+ * review stars, and gnomAD population frequency.
+ */
+export const fetchSpecificVariantDetails = async (
+  geneSymbol: string,
+  parsedPos: number,
+  parsedRef?: string,
+  parsedTarget?: string
+): Promise<{
+  amScore: number | null;
+  amPred: string | null;
+  clinicalSignificance: string;
+  clinVarStars: number;
+  gnomadAf: number | null;
+  rsid: string | null;
+  variantId: string | null;
+  found: boolean;
+}> => {
+  const emptyResult = {
+    amScore: null,
+    amPred: null,
+    clinicalSignificance: 'Uncertain significance',
+    clinVarStars: 0,
+    gnomadAf: null,
+    rsid: null,
+    variantId: null,
+    found: false
+  };
+
+  try {
+    const cleanGene = geneSymbol.trim().toUpperCase();
+    if (!cleanGene || !parsedPos) return emptyResult;
+
+    const query = `clinvar.gene.symbol:${cleanGene} AND (clinvar.rcv.preferred_name:*${parsedPos}* OR dbnsfp.hgvsp:*${parsedPos}* OR dbnsfp.aa.pos:${parsedPos})`;
+    const url = `https://myvariant.info/v1/query?q=${encodeURIComponent(query)}&fields=clinvar,dbnsfp,gnomad_exome,gnomad_genome,dbsnp&size=50`;
+    
+    const res = await fetch(url);
+    if (!res.ok) return emptyResult;
+    const data = await res.json();
+    const hits: any[] = data.hits || [];
+
+    if (hits.length === 0) return emptyResult;
+
+    // Helper to calculate ClinVar stars from review status string
+    const getStars = (status?: string): number => {
+      if (!status) return 0;
+      const s = status.toLowerCase();
+      if (s.includes('practice guideline')) return 4;
+      if (s.includes('reviewed by expert panel')) return 3;
+      if (s.includes('multiple submitters') && !s.includes('conflicting')) return 2;
+      if (s.includes('single submitter') || s.includes('criteria provided')) return 1;
+      return 0;
+    };
+
+    // Find best matching hit
+    let bestHit: any = null;
+    for (const h of hits) {
+      const dbnsfpEntry = Array.isArray(h.dbnsfp) ? h.dbnsfp[0] : h.dbnsfp;
+      const aaAlt = dbnsfpEntry?.aa?.alt;
+      const aaRef = dbnsfpEntry?.aa?.ref;
+      const aaPosList = dbnsfpEntry?.aa?.pos;
+      const posMatch = Array.isArray(aaPosList) ? aaPosList.includes(parsedPos) : aaPosList === parsedPos;
+
+      const clinEntry = Array.isArray(h.clinvar) ? h.clinvar[0] : h.clinvar;
+      const prefName = String(clinEntry?.rcv?.[0]?.preferred_name || clinEntry?.rcv?.preferred_name || '');
+      const hgvsProt = clinEntry?.hgvs?.protein;
+      const protList = Array.isArray(hgvsProt) ? hgvsProt : [hgvsProt];
+
+      const matchesTarget = parsedTarget ? (
+        (Array.isArray(aaAlt) ? aaAlt.includes(parsedTarget) : aaAlt === parsedTarget) ||
+        prefName.includes(parsedTarget) ||
+        protList.some((p: any) => String(p).includes(parsedTarget))
+      ) : true;
+
+      if (posMatch && matchesTarget) {
+        bestHit = h;
+        break;
+      }
+      if (prefName.includes(String(parsedPos)) && matchesTarget) {
+        bestHit = h;
+        break;
+      }
+      if (!bestHit && (posMatch || prefName.includes(String(parsedPos)))) {
+        bestHit = h;
+      }
+    }
+
+    if (!bestHit) bestHit = hits[0];
+
+    // Extract AlphaMissense score
+    const dbnsfp = Array.isArray(bestHit.dbnsfp) ? bestHit.dbnsfp[0] : bestHit.dbnsfp;
+    let amScore: number | null = null;
+    let amPred: string | null = null;
+
+    if (dbnsfp?.alphamissense?.score !== undefined) {
+      const raw = dbnsfp.alphamissense.score;
+      const parsedVal = parseFloat(Array.isArray(raw) ? raw[0] : raw);
+      if (!isNaN(parsedVal)) amScore = Math.round(parsedVal * 1000) / 1000;
+    }
+
+    if (dbnsfp?.alphamissense?.pred) {
+      const rawPred = Array.isArray(dbnsfp.alphamissense.pred) ? dbnsfp.alphamissense.pred[0] : dbnsfp.alphamissense.pred;
+      if (rawPred === 'P') amPred = 'Likely Pathogenic';
+      else if (rawPred === 'B') amPred = 'Likely Benign';
+      else if (rawPred === 'A') amPred = 'Ambiguous';
+      else amPred = String(rawPred);
+    } else if (amScore !== null) {
+      if (amScore >= 0.56) amPred = 'Likely Pathogenic';
+      else if (amScore <= 0.34) amPred = 'Likely Benign';
+      else amPred = 'Ambiguous';
+    }
+
+    // Extract ClinVar Clinical Significance
+    const clinvar = Array.isArray(bestHit.clinvar) ? bestHit.clinvar[0] : bestHit.clinvar;
+    const rcv = Array.isArray(clinvar?.rcv) ? clinvar.rcv[0] : clinvar?.rcv;
+    const clnSig = rcv?.clinical_significance || clinvar?.clinical_significance || 'Uncertain significance';
+    const stars = getStars(rcv?.review_status);
+
+    // Population frequency
+    let gnomadAf: number | null = null;
+    const exomeAf = bestHit.gnomad_exome?.af?.af;
+    const genomeAf = bestHit.gnomad_genome?.af?.af;
+    if (exomeAf !== undefined) gnomadAf = typeof exomeAf === 'number' ? exomeAf : parseFloat(exomeAf);
+    else if (genomeAf !== undefined) gnomadAf = typeof genomeAf === 'number' ? genomeAf : parseFloat(genomeAf);
+
+    const rsid = bestHit.clinvar?.rsid || bestHit.dbsnp?.rsid || null;
+    const variantId = bestHit.clinvar?.variant_id ? String(bestHit.clinvar.variant_id) : null;
+
+    return {
+      amScore,
+      amPred,
+      clinicalSignificance: clnSig,
+      clinVarStars: stars,
+      gnomadAf,
+      rsid,
+      variantId,
+      found: true
+    };
+  } catch (err) {
+    console.warn('[fetchSpecificVariantDetails] error:', err);
+    return emptyResult;
+  }
 };
 
 export interface GnomadV4Variant {
@@ -1078,4 +1482,118 @@ export const fetchProteinInterfaces = async (symbol: string, uniprotId?: string 
     return null;
   }
 };
+
+// --- Protein Complexes (Complex Portal) API Clients ---
+export const searchProteinComplexes = async (params: {
+  q?: string;
+  species?: 'all' | 'human' | 'yeast';
+  assembly?: string;
+  page?: number;
+  pageSize?: number;
+}): Promise<ComplexSearchResult> => {
+  try {
+    const query = new URLSearchParams();
+    if (params.q) query.append('q', params.q.trim());
+    if (params.species && params.species !== 'all') query.append('species', params.species);
+    if (params.assembly && params.assembly !== 'all') query.append('assembly', params.assembly);
+    if (params.page) query.append('page', String(params.page));
+    if (params.pageSize) query.append('pageSize', String(params.pageSize));
+
+    const res = await fetch(`/api/complexes/search?${query.toString()}`);
+    if (!res.ok) {
+      throw new Error(`Failed to fetch complexes: ${res.statusText}`);
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn("searchProteinComplexes error:", err);
+    return {
+      total: 0,
+      returned: 0,
+      page: 1,
+      pageSize: 20,
+      complexes: [],
+      assemblyCounts: {},
+      speciesCounts: { human: 0, yeast: 0 }
+    };
+  }
+};
+
+export const fetchGeneComplexes = async (gene: string): Promise<ProteinComplex[]> => {
+  try {
+    if (!gene || gene === 'N/A' || gene === 'null') return [];
+    const res = await fetch(`/api/complexes/gene/${encodeURIComponent(gene.trim())}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.complexes || [];
+  } catch (err) {
+    console.warn("fetchGeneComplexes error:", err);
+    return [];
+  }
+};
+
+export const fetchComplexById = async (complexId: string): Promise<ProteinComplex | null> => {
+  try {
+    if (!complexId) return null;
+    const res = await fetch(`/api/complexes/${encodeURIComponent(complexId.trim())}`);
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (err) {
+    console.warn("fetchComplexById error:", err);
+    return null;
+  }
+};
+
+export const fetchComplexVariants = async (complexId: string): Promise<ComplexVariantsResponse | null> => {
+  try {
+    if (!complexId) return null;
+    const res = await fetch(`/api/complexes/${encodeURIComponent(complexId.trim())}/variants`);
+    if (!res.ok) {
+      throw new Error(`Failed to load complex variants: ${res.statusText}`);
+    }
+    return await res.json();
+  } catch (err) {
+    console.warn("fetchComplexVariants error:", err);
+    return null;
+  }
+};
+
+// --- Clinician Variant Submission Portal API Client ---
+export const submitClinicianVariant = async (payload: ClinicianSubmissionInput & { conservation: VariantConservationResult }): Promise<{
+  success: boolean;
+  submissionId: string;
+  recipientEmail: string;
+  emailSent: boolean;
+  emailError?: string;
+  mailtoUrl: string;
+  record: ClinicianSubmissionRecord;
+}> => {
+  const response = await fetch('/api/clinician-submission', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || `Submission failed with status ${response.status}`);
+  }
+  return await response.json();
+};
+
+export const evaluateClinicianVariantModel = async (
+  params: ClinicianModelEvaluationParams
+): Promise<ClinicianModelEvaluationResponse> => {
+  const response = await fetch('/api/clinician-model-evaluation', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params)
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || err.message || `Evaluation request failed with status ${response.status}`);
+  }
+  return await response.json();
+};
+
+
+
 

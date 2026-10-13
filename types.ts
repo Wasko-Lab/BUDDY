@@ -57,6 +57,15 @@ export interface Variant {
   } | null;
   localHomologyScore?: number;
   clinicalSignificance?: string;
+  isConflictingPathBenign?: boolean; // True if variant has both Benign/Likely Benign AND Pathogenic/Likely Pathogenic entries in ClinVar (major conflict)
+  conflictingBreakdown?: {
+    hasPathogenic: boolean;
+    hasLikelyPathogenic: boolean;
+    hasBenign: boolean;
+    hasLikelyBenign: boolean;
+    hasVus: boolean;
+    summary?: string;
+  };
   clinVarStars?: number; // 0 to 4 gold stars
   reviewStatus?: string;
   clinVarSubmitters?: number; // Number of ClinVar submitter entries
@@ -244,7 +253,8 @@ export interface AdvancedSettings {
   filtering: {
     allowMismatches: boolean;
     excludeGaps: boolean;
-    clinVarSignificance: ('VUS' | 'PATHOGENIC' | 'LIKELY_PATHOGENIC' | 'BENIGN' | 'LIKELY_BENIGN' | 'CONFLICTING' | 'DISCORDANT')[];
+    clinVarSignificance: ('VUS' | 'PATHOGENIC' | 'LIKELY_PATHOGENIC' | 'BENIGN' | 'LIKELY_BENIGN' | 'CONFLICTING' | 'CONFLICTING_PATH_BENIGN' | 'DISCORDANT')[];
+    conflictingPathBenignOnly?: boolean;
     minClinVarStars: number;
     minDioptScore: number;
     minPercentIdentity: number;
@@ -391,4 +401,198 @@ export interface DiscordantSearchResult {
   genesCount: number;
   variants: DiscordantVariant[];
 }
+
+// --- Complex Portal Types ---
+
+export interface ComplexParticipant {
+  identifier: string; // UniProt accession or RNA ID
+  symbol: string; // Gene symbol (e.g. SMAD3, MSH2)
+  stoichiometry: number;
+  allGeneNames?: string[];
+  name?: string;
+}
+
+export interface ProteinComplex {
+  complexId: string; // e.g. CPX-1, CPX-1036
+  name: string; // e.g. SMAD2-SMAD3-SMAD4 complex
+  aliases: string[];
+  taxonomyId: string; // '9606' | '559292'
+  species: 'human' | 'yeast';
+  assembly: string; // e.g. Heterodimer, Homotrimer, etc.
+  assemblyCategory: 'Dimer' | 'Trimer' | 'Tetramer' | 'Pentamer' | 'Hexamer' | 'Heptamer' | 'Octamer' | 'Multimer' | 'Other';
+  totalSubunits: number;
+  distinctSubunits: number;
+  participants: ComplexParticipant[];
+  description: string;
+  properties?: string;
+  goAnnotations?: string[];
+  crossReferences?: string[];
+  evidence?: string;
+  source?: string;
+}
+
+export interface ComplexSearchResult {
+  total: number;
+  returned: number;
+  page: number;
+  pageSize: number;
+  complexes: ProteinComplex[];
+  assemblyCounts: Record<string, number>;
+  speciesCounts: { human: number; yeast: number };
+}
+
+export interface ComplexVariantRecord {
+  id: string; // unique ID
+  gene: string; // Subunit Gene Symbol, e.g. 'MSH2', 'MSH6'
+  yeastGene?: string; // Yeast Subunit Symbol if mapped from yeast complex
+  uniprotId?: string; // Subunit UniProt ID
+  proteinChange: string; // e.g. 'p.Arg534Leu'
+  residue: number;
+  refAA: string;
+  targetAA: string;
+  hgvs?: string;
+  clinicalSignificance: string; // 'Pathogenic', 'Likely Pathogenic', 'VUS', 'Conflicting', 'Benign', 'Likely Benign'
+  isConflictingPathBenign?: boolean;
+  conflictingSummary?: string;
+  reviewStatus: string;
+  clinVarStars: number;
+  clinVarId?: string; // RCV accession
+  clinVarVariantId?: string; // ClinVar Variation ID
+  amScore: number | null;
+  amClassification?: 'Pathogenic' | 'Benign' | 'Ambiguous' | null;
+  gnomadFreq: number | null;
+}
+
+export interface ComplexVariantsResponse {
+  complexId: string;
+  name: string;
+  assembly: string;
+  species: 'human' | 'yeast';
+  subunits: {
+    symbol: string;
+    yeastSymbol?: string;
+    identifier: string;
+    variantCount: number;
+    pathCount: number;
+    vusCount: number;
+    benignCount: number;
+    conflictCount: number;
+  }[];
+  totalVariants: number;
+  variants: ComplexVariantRecord[];
+  significanceCounts: Record<string, number>;
+}
+
+export interface VariantConservationResult {
+  allele: string;
+  parsedRef: string;
+  parsedPos: number;
+  parsedTarget: string;
+  humanRefMatchesSeq: boolean;
+  canonicalRefAA: string;
+  hasOrtholog: boolean;
+  yeastGene?: string;
+  yeastEntrezId?: string;
+  dioptScore?: number;
+  yeastAA?: string;
+  yeastPos?: number | string;
+  conservationStatus: 'Identical' | 'Similar' | 'Mismatch' | 'Gap' | 'No_Ortholog' | 'Invalid_Position';
+  isConserved: boolean;
+  localHomologyScore?: number;
+  alignmentSnippet?: {
+    humanSeq: string;
+    yeastSeq: string;
+    matchLine: string;
+    startPos: number;
+    targetIndex: number;
+  };
+  explanation: string;
+}
+
+export interface ClinicianSubmissionInput {
+  clinicianName?: string;
+  clinicianEmail?: string;
+  clinicianInstitution?: string;
+  geneSymbol: string;
+  missenseAllele: string;
+  notes?: string;
+  clinicianEvaluation?: string;
+  physicianEvaluation?: string;
+}
+
+export interface ClinicianSubmissionRecord {
+  id: string;
+  timestamp: string;
+  clinicianName: string;
+  clinicianEmail: string;
+  clinicianInstitution?: string;
+  geneSymbol: string;
+  missenseAllele: string;
+  notes?: string;
+  clinicianEvaluation?: string;
+  physicianEvaluation?: string;
+  conservation: VariantConservationResult;
+  emailSent: boolean;
+  recipientEmail: string;
+  emailError?: string;
+}
+
+export interface PubMedArticleSummary {
+  pmid: string;
+  title: string;
+  authors: string;
+  source: string;
+  pubdate: string;
+  doi?: string;
+  url?: string;
+}
+
+export interface ClinicianModelEvaluationParams {
+  geneSymbol: string;
+  missenseAllele: string;
+  clinicianName?: string;
+  clinicianEmail?: string;
+  clinicianInstitution?: string;
+  clinicalNotes?: string;
+  alignmentInfo: {
+    refAA: string;
+    pos: number;
+    targetAA: string;
+    canonicalRefAA: string;
+    yeastGene: string;
+    yeastAA: string;
+    yeastPos: number | string;
+    conservationStatus: string;
+    localHomologyScore?: number;
+    dioptScore?: number;
+    alignmentSnippet?: {
+      humanSeq: string;
+      yeastSeq: string;
+      matchLine: string;
+    };
+  };
+  variantInfo?: {
+    amScore?: number | null;
+    amPred?: string | null;
+    clinicalSignificance?: string;
+    clinVarStars?: number;
+    gnomadAf?: number | null;
+    disease?: string;
+  };
+  phenotypes?: Array<{
+    phenotype: string;
+    category?: string;
+    reference?: string;
+  }>;
+  structureImage?: string | null;
+}
+
+export interface ClinicianModelEvaluationResponse {
+  success: boolean;
+  evaluationText: string;
+  pubmedArticles?: PubMedArticleSummary[];
+  error?: string;
+}
+
+
 

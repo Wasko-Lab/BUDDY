@@ -2,14 +2,17 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { Search, Dna, Activity, Zap, FileText, AlertCircle, PlayCircle, Key, Settings, ExternalLink, Info, List, ArrowRight, Sparkles, Filter, FlaskConical, Copy, Download, HelpCircle, ChevronDown, Mail, Shuffle, BookOpen, X, Printer, Loader2, FilePlus, PenTool, Sliders, ChevronLeft, ChevronRight, Sun, Moon, RefreshCw, Link2, Star, Users, Check, Scale, Network, Target, Layers } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
-import { GeneInfo, OrthologInfo, Variant, Phenotype, PipelineState, AlignmentResult, RepairResult, Cas9Site, AdvancedSettings, ProteinDomain, ProteinPtm, FunctionalSite, ProteinInterfaceData } from './types';
-import { getHumanGeneInfo, getOrtholog, fetchSequence, fetchClinVarVariants, fetchYeastPhenotypes, searchGenes, searchGenesByAi, fetchYeastGeneSequence, getSgdId, fetchProteinDomains, fetchProteinPtms, fetchFunctionalSites, fetchProteinInterfaces, fetchGnomadV4GeneVariants, GnomadV4Variant } from './services/api';
+import { GeneInfo, OrthologInfo, Variant, Phenotype, PipelineState, AlignmentResult, RepairResult, Cas9Site, AdvancedSettings, ProteinDomain, ProteinPtm, FunctionalSite, ProteinInterfaceData, ProteinComplex } from './types';
+import { getHumanGeneInfo, getOrtholog, fetchSequence, fetchClinVarVariants, fetchAllClinVarVariants, resolveClinVarConflictingSubmissions, fetchYeastPhenotypes, searchGenes, searchGenesByAi, fetchYeastGeneSequence, getSgdId, fetchProteinDomains, fetchProteinPtms, fetchFunctionalSites, fetchProteinInterfaces, fetchGnomadV4GeneVariants, GnomadV4Variant, fetchGeneComplexes } from './services/api';
 import { alignSequences, parseProteinChange, resolveClinVarProteinChange, isSimilarAA, AA_MAP, calculateLocalHomology } from './utils/alignment';
 import { findCas9Sites, generateRepairTemplates, reverseComplement, getMutationIndex } from './utils/crispr';
 import { generateExperimentalPlan } from './services/geminiService';
 import { AlignmentView } from './components/AlignmentView';
 import { StructureViewer, StructureViewerHandle } from './components/StructureViewer';
 import { DiscordantVariantsExplorer } from './components/DiscordantVariantsExplorer';
+import { VariantLandscapeViewer } from './components/VariantLandscapeViewer';
+import { ProteinComplexesExplorer } from './components/ProteinComplexesExplorer';
+import { ClinicianPortal } from './components/ClinicianPortal';
 import rareDiseasesTsv from './data/RareDiseases_BestYeastHomologs_DIOPT5plus62026.tsv?raw';
 
 const RARE_DISEASE_GENES = rareDiseasesTsv
@@ -364,8 +367,42 @@ export const App: React.FC = () => {
   // Theme State
   const [isDarkMode, setIsDarkMode] = useState(false);
 
+  // Dedicated VUS Clinician Portal Page Routing (/VUS, /VUS/, ?view=vus)
+  const [isVusPage, setIsVusPage] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    const path = window.location.pathname.toLowerCase();
+    const search = window.location.search.toLowerCase();
+    const hash = window.location.hash.toLowerCase();
+    return path.startsWith('/vus') || search.includes('view=vus') || hash.includes('vus');
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const path = window.location.pathname.toLowerCase();
+      const search = window.location.search.toLowerCase();
+      const hash = window.location.hash.toLowerCase();
+      setIsVusPage(path.startsWith('/vus') || search.includes('view=vus') || hash.includes('vus'));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  const navigateToVus = () => {
+    window.history.pushState({}, '', '/VUS/');
+    setIsVusPage(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const navigateToMain = () => {
+    window.history.pushState({}, '', '/');
+    setIsVusPage(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // UI Mode
-  const [inputMode, setInputMode] = useState<'manual' | 'rare' | 'topic' | 'discordant'>('rare');
+  const [inputMode, setInputMode] = useState<'manual' | 'rare' | 'topic' | 'discordant' | 'complex'>('rare');
+  const [complexSearchQuery, setComplexSearchQuery] = useState('');
+  const [activeGeneComplexes, setActiveGeneComplexes] = useState<ProteinComplex[]>([]);
   
   // Input State
   const [geneInput, setGeneInput] = useState('');
@@ -422,11 +459,19 @@ export const App: React.FC = () => {
   const [selectedPhenotype, setSelectedPhenotype] = useState<string | null>(null);
   const [copiedRef, setCopiedRef] = useState(false);
   const [copiedRefKey, setCopiedRefKey] = useState<string | null>(null);
+  const [copiedOligoKey, setCopiedOligoKey] = useState<string | null>(null);
   const [phenotypeStudyFilter, setPhenotypeStudyFilter] = useState<'all' | 'classic' | 'high-throughput'>('all');
   const [visibleVariantsCount, setVisibleVariantsCount] = useState(10);
-  const [variantSortBy, setVariantSortBy] = useState<'residue' | 'amScore' | 'localHomology' | 'stars' | 'submitters' | 'gnomad' | 'annotations'>('localHomology');
+  const [variantSortBy, setVariantSortBy] = useState<'residue' | 'amScore' | 'localHomology' | 'variantType' | 'stars' | 'submitters' | 'gnomad' | 'annotations'>('localHomology');
   const [variantSortDirection, setVariantSortDirection] = useState<'asc' | 'desc'>('desc');
   const [isAnnotationsLoading, setIsAnnotationsLoading] = useState(false);
+
+  // Variant Landscape State
+  const [showLandscapeView, setShowLandscapeView] = useState(false);
+  const [landscapeVariants, setLandscapeVariants] = useState<Variant[]>([]);
+  const [isLoadingLandscape, setIsLoadingLandscape] = useState(false);
+  const [selectedLandscapeResidue, setSelectedLandscapeResidue] = useState<number | null>(null);
+  const [isOverlayOnAlignmentActive, setIsOverlayOnAlignmentActive] = useState(false);
 
   const addLog = useCallback((msg: string) => {
     setState(prev => ({ ...prev, logs: [...prev.logs, msg] }));
@@ -601,7 +646,13 @@ export const App: React.FC = () => {
   }, [alignment]);
 
   const sortedAndMappedVariants = useMemo(() => {
-     const mapped = variants.map((v, i) => ({ v, originalIndex: i }));
+     let list = variants;
+     if (settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN')) {
+       list = list.filter(v => v.isConflictingPathBenign);
+     } else if (settings.filtering.conflictingPathBenignOnly) {
+       list = list.filter(v => v.clinicalSignificance !== 'Conflicting' || v.isConflictingPathBenign);
+     }
+     const mapped = list.map((v) => ({ v, originalIndex: variants.indexOf(v) }));
      mapped.sort((a, b) => {
          if (variantSortBy === 'residue') {
              return variantSortDirection === 'asc' ? a.v.residue - b.v.residue : b.v.residue - a.v.residue;
@@ -613,6 +664,26 @@ export const App: React.FC = () => {
              const scoreA = a.v.localHomologyScore ?? -1;
              const scoreB = b.v.localHomologyScore ?? -1;
              return variantSortDirection === 'asc' ? scoreA - scoreB : scoreB - scoreA;
+         } else if (variantSortBy === 'variantType') {
+             const getSigWeight = (v: Variant) => {
+                 if (v.isConflictingPathBenign) return 60;
+                 const sig = (v.clinicalSignificance || '').toLowerCase();
+                 if (sig === 'pathogenic') return 80;
+                 if (sig === 'likely pathogenic') return 70;
+                 if (sig === 'conflicting') return 50;
+                 if (sig === 'vus' || sig.includes('uncertain')) return 40;
+                 if (sig === 'likely benign') return 30;
+                 if (sig === 'benign') return 20;
+                 return 10;
+             };
+             const weightA = getSigWeight(a.v);
+             const weightB = getSigWeight(b.v);
+             if (weightA !== weightB) {
+                 return variantSortDirection === 'asc' ? weightA - weightB : weightB - weightA;
+             }
+             const homA = a.v.localHomologyScore ?? -1;
+             const homB = b.v.localHomologyScore ?? -1;
+             return homB - homA;
          } else if (variantSortBy === 'gnomad') {
              const freqA = a.v.gnomadFreq !== null && a.v.gnomadFreq !== undefined ? a.v.gnomadFreq : -1;
              const freqB = b.v.gnomadFreq !== null && b.v.gnomadFreq !== undefined ? b.v.gnomadFreq : -1;
@@ -635,7 +706,7 @@ export const App: React.FC = () => {
          return 0;
      });
      return mapped;
-  }, [variants, variantSortBy, variantSortDirection, residueAnnotationsMap]);
+  }, [variants, variantSortBy, variantSortDirection, residueAnnotationsMap, settings.filtering.clinVarSignificance, settings.filtering.conflictingPathBenignOnly]);
   
   // AI Generation State
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
@@ -676,6 +747,7 @@ export const App: React.FC = () => {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const logsContainerRef = useRef<HTMLDivElement>(null);
   const variantsTableRef = useRef<HTMLDivElement>(null);
+  const summaryCardsRef = useRef<HTMLDivElement>(null);
   const structureViewerRef = useRef<StructureViewerHandle>(null);
 
   // Dark Mode Effect
@@ -687,9 +759,11 @@ export const App: React.FC = () => {
     }
   }, [isDarkMode]);
 
-  // Auto-scroll logs
+  // Auto-scroll logs (scroll inside the terminal container only, without scrolling the main window)
   useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (logsContainerRef.current) {
+      logsContainerRef.current.scrollTop = logsContainerRef.current.scrollHeight;
+    }
   }, [state.logs, state.error]);
 
   // Sync repair length setting with state
@@ -914,6 +988,50 @@ export const App: React.FC = () => {
     }, 80);
   };
 
+  const handleComplexGeneSelect = (geneSymbol: string) => {
+    setInputMode('manual');
+    setManualSearchSpecies('human');
+    setGeneInput(geneSymbol);
+    setShowRareList(false);
+    addLog(`[Complex Portal] Selected complex subunit ${geneSymbol}. Initializing ortholog mapping & analysis...`);
+    setTimeout(() => {
+      runPipeline(geneSymbol);
+    }, 80);
+  };
+
+  const handleComplexVariantSelect = (geneSymbol: string, hgvs?: string, variantObj?: any) => {
+    setInputMode('manual');
+    setManualSearchSpecies('human');
+    setGeneInput(geneSymbol);
+    setShowRareList(false);
+    addLog(`[Complex Variant Explorer] Selected complex subunit ${geneSymbol} variant ${variantObj?.proteinChange || hgvs || ''}. Initializing ortholog mapping & CRISPR pipeline...`);
+    setTimeout(() => {
+      runPipeline(geneSymbol, hgvs, variantObj);
+    }, 80);
+  };
+
+  const handleClinicianVariantSelect = (geneSymbol: string, allele: string) => {
+    navigateToMain();
+    setInputMode('manual');
+    setManualSearchSpecies('human');
+    setGeneInput(geneSymbol);
+    setShowRareList(false);
+    addLog(`[Clinician Portal] Loading submitted variant ${geneSymbol} ${allele} into BUDDY pipeline...`);
+    setTimeout(() => {
+      runPipeline(geneSymbol, allele);
+    }, 120);
+  };
+
+  useEffect(() => {
+    if (geneInfo?.symbol) {
+      fetchGeneComplexes(geneInfo.symbol)
+        .then(res => setActiveGeneComplexes(res))
+        .catch(() => setActiveGeneComplexes([]));
+    } else {
+      setActiveGeneComplexes([]);
+    }
+  }, [geneInfo?.symbol]);
+
   const runPipeline = async (identifier?: string, targetHgvs?: string, targetVariantObj?: any) => {
     // Automatically remove leading and trailing spaces from gene inputs
     const trimmedGeneInput = geneInput.trim();
@@ -938,6 +1056,8 @@ export const App: React.FC = () => {
     setSelectedVariantIndices([]);
     setSelectedPhenotype(null);
     setVisibleVariantsCount(10);
+    setVariantSortBy('localHomology');
+    setVariantSortDirection('desc');
     setYeastUniProtId(null);
     setYeastSgdId(null);
     setProteinDomains([]);
@@ -945,6 +1065,10 @@ export const App: React.FC = () => {
     setFunctionalSites([]);
     setProteinInterfaces(null);
     setIsAnnotationsLoading(false);
+    setLandscapeVariants([]);
+    setShowLandscapeView(false);
+    setSelectedLandscapeResidue(null);
+    setIsOverlayOnAlignmentActive(false);
     
     // If identifier is missing, it's a manual run, so we clear selected disease context
     if (!identifier) {
@@ -1167,6 +1291,13 @@ export const App: React.FC = () => {
 
       setOrtholog(orth);
       
+      // Gently scroll down to human gene and yeast ortholog cards near top of page (below sticky status terminal)
+      if (!targetHgvs) {
+        setTimeout(() => {
+          summaryCardsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 120);
+      }
+      
       if (!yeastOnlyMode) {
           addLog(`Ortholog pair: ${gInfo!.symbol} <-> ${orth.symbol} (Score: ${orth.score})`);
           if (orth.tiedSymbols && orth.tiedSymbols.length > 0) {
@@ -1372,6 +1503,9 @@ export const App: React.FC = () => {
           if (sigs.includes('CONFLICTING')) {
               sigTerms.push('Conflicting interpretations of pathogenicity');
           }
+          if (sigs.includes('CONFLICTING_PATH_BENIGN')) {
+              sigTerms.push('Conflicting interpretations of pathogenicity', 'Pathogenic', 'Likely pathogenic', 'Benign', 'Likely benign');
+          }
           if (sigs.includes('DISCORDANT')) {
               sigTerms.push('Pathogenic', 'Likely pathogenic', 'Benign', 'Likely benign');
           }
@@ -1383,15 +1517,18 @@ export const App: React.FC = () => {
           if (sigs.includes('LIKELY_BENIGN')) sigLabels.push('Likely Benign');
           if (sigs.includes('VUS')) sigLabels.push('VUS');
           if (sigs.includes('CONFLICTING')) sigLabels.push('Conflicting');
+          if (sigs.includes('CONFLICTING_PATH_BENIGN')) sigLabels.push('Conflicting (Path vs Benign only)');
           if (sigs.includes('DISCORDANT')) sigLabels.push('Discordant (ClinVar ⇄ AM)');
           const sigDescription = sigLabels.length > 0 ? sigLabels.join(', ') : 'VUS';
 
           const starsDescription = settings.filtering.minClinVarStars > 0 ? ` (≥ ${settings.filtering.minClinVarStars}★)` : '';
           addLog(`Fetching ClinVar variants [${sigDescription}]${starsDescription} & AlphaMissense data...`);
 
+          const isPathBenignOnly = sigs.includes('CONFLICTING_PATH_BENIGN') && sigs.length === 1;
           const rawHits = await fetchClinVarVariants(gInfo!.symbol, sigTerms, {
-              excludeUncertain: !sigs.includes('VUS'),
-              excludeConflicting: !sigs.includes('CONFLICTING'),
+              excludeUncertain: !sigs.includes('VUS') && !isPathBenignOnly,
+              excludeConflicting: !sigs.includes('CONFLICTING') && !sigs.includes('CONFLICTING_PATH_BENIGN'),
+              conflictingPathBenignOnly: isPathBenignOnly || settings.filtering.conflictingPathBenignOnly,
               minStars: settings.filtering.minClinVarStars
           });
           addLog(`Found ${rawHits.length} raw hits. Parsing and applying strict significance filters...`);
@@ -1503,11 +1640,19 @@ export const App: React.FC = () => {
                                     }
                                 }
 
-                                const hasUncertain = allSigTerms.some(s => s.includes('uncertain'));
+                                const hasUncertain = hit._conflictResolution?.hasVus ?? allSigTerms.some(s => s.includes('uncertain'));
                                 const hasConflictingTerm = allSigTerms.some(s => s.includes('conflicting'));
                                 const hasConflictingReview = rcvList.some((r: any) => String(r?.review_status || '').toLowerCase().includes('conflicting'));
-                                const hasPathogenicAssertion = allSigTerms.some(s => s.includes('pathogenic'));
-                                const hasBenignAssertion = allSigTerms.some(s => s.includes('benign'));
+                                const hasExactPathogenic = hit._conflictResolution?.hasPathogenic ?? (allSigTerms.some(s => (s === 'pathogenic' || s.startsWith('pathogenic') || s === 'pathogenic/likely pathogenic') && !s.startsWith('likely pathogenic')));
+                                const hasLikelyPathogenic = hit._conflictResolution?.hasLikelyPathogenic ?? allSigTerms.some(s => s.includes('likely pathogenic'));
+                                const hasExactBenign = hit._conflictResolution?.hasBenign ?? (allSigTerms.some(s => (s === 'benign' || s.startsWith('benign') || s === 'benign/likely benign') && !s.startsWith('likely benign')));
+                                const hasLikelyBenign = hit._conflictResolution?.hasLikelyBenign ?? allSigTerms.some(s => s.includes('likely benign'));
+
+                                const hasPathogenicAssertion = hasExactPathogenic || hasLikelyPathogenic;
+                                const hasBenignAssertion = hasExactBenign || hasLikelyBenign;
+
+                                // High-Impact Major Conflict: Contains entries as BOTH (Pathogenic OR Likely Pathogenic) AND (Benign OR Likely Benign)
+                                const isPathBenignConflict = hit._conflictResolution?.isPathBenignConflict ?? (hasPathogenicAssertion && hasBenignAssertion);
 
                                 // Conflicting designation check:
                                 // 1. Explicit conflicting term in clinical significance
@@ -1516,25 +1661,25 @@ export const App: React.FC = () => {
                                 // 4. Discordant assertions between Uncertain significance and Pathogenic/Benign submissions
                                 const isConflicted = hasConflictingTerm || 
                                                      hasConflictingReview || 
-                                                     (hasPathogenicAssertion && hasBenignAssertion) ||
+                                                     isPathBenignConflict ||
                                                      (hasUncertain && (hasPathogenicAssertion || hasBenignAssertion));
 
-                                // STRICT RULE: If user did NOT select CONFLICTING, any variant with conflicting interpretations must NOT be retrieved.
+                                // STRICT RULE: If user did NOT select CONFLICTING or CONFLICTING_PATH_BENIGN, any variant with conflicting interpretations must NOT be retrieved.
                                 // This ensures that searching for VUS alone strictly omits all conflicting variants.
-                                if (!sigs.includes('CONFLICTING') && isConflicted) {
+                                if (!sigs.includes('CONFLICTING') && !sigs.includes('CONFLICTING_PATH_BENIGN') && isConflicted) {
                                     continue;
                                 }
 
-                                // STRICT RULE: If user did NOT select VUS, any variant with uncertain significance must NOT be retrieved
-                                if (!sigs.includes('VUS') && hasUncertain) {
+                                // STRICT RULE: If user selected CONFLICTING_PATH_BENIGN (or enabled conflictingPathBenignOnly), strictly require BOTH Pathogenic AND Benign entries!
+                                // Strictly omit benign + VUS or pathogenic + VUS conflicts.
+                                if ((sigs.includes('CONFLICTING_PATH_BENIGN') || settings.filtering.conflictingPathBenignOnly) && !isPathBenignConflict) {
                                     continue;
                                 }
 
-                                const hasExactPathogenic = allSigTerms.some(s => (s === 'pathogenic' || s.startsWith('pathogenic') || s === 'pathogenic/likely pathogenic') && !s.startsWith('likely pathogenic'));
-                                const hasLikelyPathogenic = allSigTerms.some(s => s.includes('likely pathogenic'));
-
-                                const hasExactBenign = allSigTerms.some(s => (s === 'benign' || s.startsWith('benign') || s === 'benign/likely benign') && !s.startsWith('likely benign'));
-                                const hasLikelyBenign = allSigTerms.some(s => s.includes('likely benign'));
+                                // STRICT RULE: If user did NOT select VUS, any variant with uncertain significance must NOT be retrieved (unless conflicting is selected)
+                                if (!sigs.includes('VUS') && !sigs.includes('CONFLICTING') && !sigs.includes('CONFLICTING_PATH_BENIGN') && hasUncertain) {
+                                    continue;
+                                }
 
                                 // Categorize primary variant significance
                                 let variantType = 'Unknown';
@@ -1578,6 +1723,13 @@ export const App: React.FC = () => {
                                     isAllowed = true;
                                 }
                                 if (sigs.includes('CONFLICTING') && variantType === 'Conflicting') {
+                                    if (settings.filtering.conflictingPathBenignOnly) {
+                                        if (isPathBenignConflict) isAllowed = true;
+                                    } else {
+                                        isAllowed = true;
+                                    }
+                                }
+                                if (sigs.includes('CONFLICTING_PATH_BENIGN') && isPathBenignConflict) {
                                     isAllowed = true;
                                 }
                                 if (sigs.includes('DISCORDANT')) {
@@ -1655,6 +1807,17 @@ export const App: React.FC = () => {
                                     gnomadDetails: gnomadData.details,
                                     localHomologyScore: localScore,
                                     clinicalSignificance: variantType,
+                                    isConflictingPathBenign: isPathBenignConflict,
+                                    conflictingBreakdown: {
+                                        hasPathogenic: hasExactPathogenic,
+                                        hasLikelyPathogenic,
+                                        hasBenign: hasExactBenign,
+                                        hasLikelyBenign,
+                                        hasVus: hasUncertain,
+                                        summary: isPathBenignConflict 
+                                            ? `${hasExactPathogenic ? 'Path' : 'Likely Path'} vs ${hasExactBenign ? 'Benign' : 'Likely Benign'}${hasUncertain ? ' (+VUS)' : ''}`
+                                            : undefined
+                                    },
                                     clinVarStars: maxStars,
                                     reviewStatus: primaryReviewStatus,
                                     clinVarSubmitters: totalSubmitters > 0 ? totalSubmitters : undefined
@@ -1855,6 +2018,248 @@ export const App: React.FC = () => {
           
           // Scroll removed to prevent focus jump
       }
+  };
+
+  // Load all ClinVar variants across all categories (Pathogenic, VUS, Conflicting, Benign) for the full Landscape View
+  const loadLandscapeVariants = useCallback(async () => {
+    if (!geneInfo?.symbol) return;
+    const canonicalSeq = alignment ? alignment.humanSeqAligned.replace(/-/g, '') : '';
+    if (!canonicalSeq) return;
+
+    setIsLoadingLandscape(true);
+    addLog(`[Variant Landscape] Fetching all ClinVar variants (Pathogenic, VUS, Conflicting, Benign) & AlphaMissense data for ${geneInfo.symbol}...`);
+    try {
+      const rawHits = await fetchAllClinVarVariants(geneInfo.symbol);
+      addLog(`[Variant Landscape] Retrieved ${rawHits.length} raw ClinVar records. Resolving against canonical human protein...`);
+
+      // Pre-resolve conflicting variants that might be true Path vs Benign conflicts in ClinVar submissions
+      const conflictIds = rawHits
+        .filter((h: any) => {
+          let cv = h.clinvar;
+          if (Array.isArray(cv)) cv = cv[0];
+          const rcvs = Array.isArray(cv?.rcv) ? cv.rcv : (cv?.rcv ? [cv.rcv] : []);
+          return rcvs.some((r: any) => String(r?.clinical_significance || '').toLowerCase().includes('conflicting'));
+        })
+        .map((h: any) => (Array.isArray(h.clinvar) ? h.clinvar[0] : h.clinvar)?.variant_id)
+        .filter(Boolean)
+        .slice(0, 50);
+
+      const conflictMap = conflictIds.length > 0 ? await resolveClinVarConflictingSubmissions(conflictIds) : new Map();
+
+      const parsed: Variant[] = [];
+      for (const hit of rawHits) {
+        let clinVarEntry = hit.clinvar;
+        if (Array.isArray(clinVarEntry)) clinVarEntry = clinVarEntry[0];
+        if (!clinVarEntry) continue;
+
+        const resolved = resolveClinVarProteinChange(hit, canonicalSeq, geneInfo.symbol);
+        if (!resolved) continue;
+
+        // Strictly guard against alternative-isoform residue offsets (which cause artificial density spikes at protein start)
+        if (canonicalSeq) {
+          if (!resolved.isSeqMatch) continue;
+          if (resolved.parsed.res < 1 || resolved.parsed.res > canonicalSeq.length) continue;
+          if (canonicalSeq[resolved.parsed.res - 1] !== resolved.parsed.ref) continue;
+        }
+
+        const pChangeStr = resolved.raw;
+        const cleanName = resolved.cleanName;
+        const pObj = resolved.parsed;
+
+        let status: Variant['conservedStatus'] = 'N/A';
+        let yeastAA = '-';
+        let yeastPos = '-';
+        let localScore = 0;
+
+        if (alignment) {
+          let currentResCount = 0;
+          let alignIndex = -1;
+          for (let i = 0; i < alignment.humanSeqAligned.length; i++) {
+            if (alignment.humanSeqAligned[i] !== '-') {
+              currentResCount++;
+              if (currentResCount === pObj.res) {
+                alignIndex = i;
+                break;
+              }
+            }
+          }
+
+          if (alignIndex === -1) continue;
+
+          const hChar = alignment.humanSeqAligned[alignIndex];
+          const yChar = alignment.yeastSeqAligned[alignIndex];
+          if (hChar !== pObj.ref) continue;
+
+          localScore = calculateLocalHomology(alignment.humanSeqAligned, alignment.yeastSeqAligned, alignIndex);
+          if (yChar === '-') {
+            status = 'Gap';
+          } else {
+            let yCount = 0;
+            for (let k = 0; k <= alignIndex; k++) {
+              if (alignment.yeastSeqAligned[k] !== '-') yCount++;
+            }
+            yeastAA = yChar;
+            yeastPos = yCount.toString();
+            if (hChar === yChar) status = 'Identical';
+            else if (isSimilarAA(hChar, yChar)) status = 'Similar';
+            else status = 'Mismatch';
+          }
+        }
+
+        let amScore: number | null = null;
+        const dbnsfpEntry = Array.isArray(hit.dbnsfp) ? hit.dbnsfp[0] : hit.dbnsfp;
+        if (dbnsfpEntry?.alphamissense?.score) {
+          const rawScore = dbnsfpEntry.alphamissense.score;
+          amScore = parseFloat(Array.isArray(rawScore) ? rawScore[0] : rawScore);
+        }
+
+        let rcvs = clinVarEntry.rcv;
+        let rcvList: any[] = [];
+        if (rcvs) rcvList = Array.isArray(rcvs) ? rcvs : [rcvs];
+
+        const allSigTerms: string[] = [];
+        for (const rcv of rcvList) {
+          if (rcv?.clinical_significance) {
+            if (Array.isArray(rcv.clinical_significance)) {
+              rcv.clinical_significance.forEach((s: any) => allSigTerms.push(String(s).toLowerCase().trim()));
+            } else {
+              allSigTerms.push(String(rcv.clinical_significance).toLowerCase().trim());
+            }
+          }
+        }
+        if (allSigTerms.length === 0 && clinVarEntry.clinical_significance) {
+          if (Array.isArray(clinVarEntry.clinical_significance)) {
+            clinVarEntry.clinical_significance.forEach((s: any) => allSigTerms.push(String(s).toLowerCase().trim()));
+          } else {
+            allSigTerms.push(String(clinVarEntry.clinical_significance).toLowerCase().trim());
+          }
+        }
+
+        const vid = String(clinVarEntry.variant_id || '');
+        const resolution = conflictMap.get(vid);
+
+        const hasExactPathogenic = resolution?.hasPathogenic ?? (allSigTerms.some(s => (s === 'pathogenic' || s.startsWith('pathogenic') || s === 'pathogenic/likely pathogenic') && !s.startsWith('likely pathogenic')));
+        const hasLikelyPathogenic = resolution?.hasLikelyPathogenic ?? allSigTerms.some(s => s.includes('likely pathogenic'));
+        const hasExactBenign = resolution?.hasBenign ?? (allSigTerms.some(s => (s === 'benign' || s.startsWith('benign') || s === 'benign/likely benign') && !s.startsWith('likely benign')));
+        const hasLikelyBenign = resolution?.hasLikelyBenign ?? allSigTerms.some(s => s.includes('likely benign'));
+        const hasUncertain = resolution?.hasVus ?? allSigTerms.some(s => s.includes('uncertain'));
+        const hasConflictingTerm = allSigTerms.some(s => s.includes('conflicting'));
+        const hasConflictingReview = rcvList.some((r: any) => String(r?.review_status || '').toLowerCase().includes('conflicting'));
+
+        const hasPathogenicAssertion = hasExactPathogenic || hasLikelyPathogenic;
+        const hasBenignAssertion = hasExactBenign || hasLikelyBenign;
+        const isPathBenignConflict = resolution?.isPathBenignConflict ?? (hasPathogenicAssertion && hasBenignAssertion);
+
+        const isConflicted = hasConflictingTerm || 
+                             hasConflictingReview || 
+                             isPathBenignConflict ||
+                             (hasUncertain && (hasPathogenicAssertion || hasBenignAssertion));
+
+        let variantType = 'Unknown';
+        if (isConflicted || isPathBenignConflict) variantType = 'Conflicting';
+        else if (hasExactPathogenic) variantType = 'Pathogenic';
+        else if (hasLikelyPathogenic) variantType = 'Likely Pathogenic';
+        else if (hasExactBenign) variantType = 'Benign';
+        else if (hasLikelyBenign) variantType = 'Likely Benign';
+        else if (hasUncertain) variantType = 'VUS';
+
+        let maxStars = 0;
+        for (const rcv of rcvList) {
+          const stars = getClinVarStarsFromStatus(rcv?.review_status);
+          if (stars > maxStars) maxStars = stars;
+        }
+
+        const primaryRcv = rcvList.find((r: any) => {
+          const s = String(r?.clinical_significance || '').toLowerCase();
+          if (variantType === 'Pathogenic' && s.includes('pathogenic') && !s.includes('likely')) return true;
+          if (variantType === 'Likely Pathogenic' && s.includes('likely pathogenic')) return true;
+          if (variantType === 'Benign' && s.includes('benign') && !s.includes('likely')) return true;
+          if (variantType === 'Likely Benign' && s.includes('likely benign')) return true;
+          if (variantType === 'VUS' && s.includes('uncertain')) return true;
+          return false;
+        }) || rcvList[0];
+
+        const clinVarAccession = primaryRcv?.accession || clinVarEntry.rcv?.[0]?.accession || clinVarEntry.rcv?.accession;
+        const primaryReviewStatus = primaryRcv?.review_status || rcvList[0]?.review_status || '';
+
+        let totalSubmitters = 0;
+        for (const rcv of rcvList) {
+          if (typeof rcv?.number_submitters === 'number') totalSubmitters += rcv.number_submitters;
+          else if (rcv) totalSubmitters += 1;
+        }
+        if (totalSubmitters === 0 && rcvList.length > 0) totalSubmitters = rcvList.length;
+
+        const gnomadData = extractGnomadData(hit);
+
+        parsed.push({
+          hgvs: pChangeStr,
+          proteinChange: cleanName,
+          residue: pObj.res,
+          refAA: pObj.ref,
+          targetAA: pObj.target,
+          conservedStatus: status,
+          yeastAA,
+          yeastPos,
+          amScore,
+          clinVarId: clinVarAccession,
+          clinVarVariantId: clinVarEntry.variant_id,
+          gnomadFreq: gnomadData.freq,
+          gnomadLink: gnomadData.link,
+          gnomadLinkV4: gnomadData.linkV4,
+          gnomadDetails: gnomadData.details,
+          localHomologyScore: localScore,
+          clinicalSignificance: variantType,
+          isConflictingPathBenign: isPathBenignConflict,
+          conflictingBreakdown: {
+            hasPathogenic: hasExactPathogenic,
+            hasLikelyPathogenic,
+            hasBenign: hasExactBenign,
+            hasLikelyBenign,
+            hasVus: hasUncertain,
+            summary: isPathBenignConflict 
+              ? `${hasExactPathogenic ? 'Path' : 'Likely Path'} vs ${hasExactBenign ? 'Benign' : 'Likely Benign'}${hasUncertain ? ' (+VUS)' : ''}`
+              : undefined
+          },
+          clinVarStars: maxStars,
+          reviewStatus: primaryReviewStatus,
+          clinVarSubmitters: totalSubmitters > 0 ? totalSubmitters : undefined
+        });
+      }
+
+      setLandscapeVariants(parsed);
+      addLog(`[Variant Landscape] Successfully mapped ${parsed.length} total variants across the landscape for ${geneInfo.symbol}.`);
+    } catch (err) {
+      console.error("Failed to load landscape variants", err);
+      addLog(`[Variant Landscape] Error loading variants: ${(err as Error).message || err}`);
+    } finally {
+      setIsLoadingLandscape(false);
+    }
+  }, [geneInfo, alignment, addLog]);
+
+  const handleSelectLandscapeResidue = (residue: number, variant?: Variant) => {
+    setSelectedLandscapeResidue(residue);
+    const sortedIndex = sortedAndMappedVariants.findIndex(obj => obj.v.residue === residue);
+    if (sortedIndex !== -1) {
+      handleResidueClick(residue);
+    }
+  };
+
+  const handleJumpToAlignmentFromLandscape = (residue: number) => {
+    setSelectedLandscapeResidue(residue);
+    handleResidueClick(residue);
+    const alignEl = document.getElementById('alignment-view-card');
+    if (alignEl) {
+      alignEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  const handleHighlightStructureFromLandscape = (residue: number) => {
+    setSelectedLandscapeResidue(residue);
+    handleResidueClick(residue);
+    const structEl = document.getElementById('structure-viewer-card');
+    if (structEl) {
+      structEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
   };
 
   const togglePhenotypeSelection = (pheno: string) => {
@@ -2242,7 +2647,12 @@ export const App: React.FC = () => {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
-    // Could add toast notification here
+  };
+
+  const handleCopyOligo = (key: string, text: string) => {
+    copyToClipboard(text);
+    setCopiedOligoKey(key);
+    setTimeout(() => setCopiedOligoKey(null), 1500);
   };
   
   const handleShowMore = () => {
@@ -2362,18 +2772,56 @@ export const App: React.FC = () => {
           {/* Repair Templates */}
           <div className="space-y-3">
               <div className="relative group">
-                  <div className="flex justify-between text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase mb-1">
-                      Genomic Repair Template (Variant)
-                      <button onClick={() => copyToClipboard(currentCrispr.repairTemplate)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200"><Copy className="w-3 h-3"/></button>
+                  <div className="flex justify-between items-center text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase mb-1">
+                      <span>Genomic Repair Template (Variant)</span>
+                      <div className="flex items-center gap-1">
+                          <button 
+                              onClick={() => handleCopyOligo('repair_fwd', currentCrispr.repairTemplate)} 
+                              className="p-1 hover:bg-emerald-100 dark:hover:bg-emerald-900 rounded text-emerald-600 dark:text-emerald-400 transition-colors" 
+                              title="Copy Genomic Repair Template"
+                          >
+                              {copiedOligoKey === 'repair_fwd' ? <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400"/> : <Copy className="w-3 h-3"/>}
+                          </button>
+                          <button 
+                              onClick={() => handleCopyOligo('repair_rc', reverseComplement(currentCrispr.repairTemplate))} 
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors flex items-center gap-0.5 leading-none ${
+                                copiedOligoKey === 'repair_rc'
+                                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                                  : 'hover:bg-emerald-100 dark:hover:bg-emerald-900 text-emerald-600 dark:text-emerald-400 border-emerald-300 dark:border-emerald-700/60'
+                              }`} 
+                              title="Copy Reverse Complement of Genomic Repair Template"
+                          >
+                              {copiedOligoKey === 'repair_rc' ? <><Check className="w-2.5 h-2.5"/> Copied RC</> : 'RC'}
+                          </button>
+                      </div>
                   </div>
                   <div className="font-mono text-xs text-slate-600 dark:text-slate-400 bg-white/60 dark:bg-slate-900/60 p-2 rounded break-all border border-emerald-200 dark:border-emerald-800">
                       {currentCrispr.repairTemplate}
                   </div>
               </div>
               <div className="relative group">
-                  <div className="flex justify-between text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase mb-1">
-                      Repair Template (Deletion Control)
-                      <button onClick={() => copyToClipboard(currentCrispr.deletionRepairTemplate)} className="text-emerald-600 dark:text-emerald-400 hover:text-emerald-800 dark:hover:text-emerald-200"><Copy className="w-3 h-3"/></button>
+                  <div className="flex justify-between items-center text-xs font-bold text-emerald-600 dark:text-emerald-400 uppercase mb-1">
+                      <span>Repair Template (Deletion Control)</span>
+                      <div className="flex items-center gap-1">
+                          <button 
+                              onClick={() => handleCopyOligo('del_fwd', currentCrispr.deletionRepairTemplate)} 
+                              className="p-1 hover:bg-emerald-100 dark:hover:bg-emerald-900 rounded text-emerald-600 dark:text-emerald-400 transition-colors" 
+                              title="Copy Deletion Control Repair Template"
+                          >
+                              {copiedOligoKey === 'del_fwd' ? <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400"/> : <Copy className="w-3 h-3"/>}
+                          </button>
+                          <button 
+                              onClick={() => handleCopyOligo('del_rc', reverseComplement(currentCrispr.deletionRepairTemplate))} 
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors flex items-center gap-0.5 leading-none ${
+                                copiedOligoKey === 'del_rc'
+                                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
+                                  : 'hover:bg-emerald-100 dark:hover:bg-emerald-900 text-emerald-600 dark:text-emerald-400 border-emerald-300 dark:border-emerald-700/60'
+                              }`} 
+                              title="Copy Reverse Complement of Deletion Control Repair Template"
+                          >
+                              {copiedOligoKey === 'del_rc' ? <><Check className="w-2.5 h-2.5"/> Copied RC</> : 'RC'}
+                          </button>
+                      </div>
                   </div>
                   <div className="font-mono text-xs text-slate-600 dark:text-slate-400 bg-white/60 dark:bg-slate-900/60 p-2 rounded break-all border border-emerald-200 dark:border-emerald-800">
                       {currentCrispr.deletionRepairTemplate}
@@ -2501,6 +2949,83 @@ export const App: React.FC = () => {
       </div>
       );
   };
+
+  if (isVusPage) {
+    return (
+      <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-[#0f172a] text-slate-900 dark:text-slate-100 transition-colors duration-300">
+        {/* Dedicated Clinician Portal Header */}
+        <header className="bg-white/90 dark:bg-slate-900/90 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 sticky top-0 z-50 transition-colors duration-300">
+          <div className="w-full max-w-[96%] mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={navigateToMain}
+                className="bg-emerald-600 p-2 rounded-lg relative overflow-hidden shadow-sm hover:opacity-90 transition-opacity cursor-pointer"
+                title="Return to BUDDY Platform"
+              >
+                <div className="relative w-6 h-6">
+                  <div className="absolute inset-0 border-2 border-white rounded-full"></div>
+                  <div className="absolute -top-1 -right-1 w-3 h-3 bg-white rounded-full border-2 border-emerald-600"></div>
+                  <Dna className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 text-white" />
+                </div>
+              </button>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-lg font-bold text-slate-900 dark:text-white tracking-tight flex items-center gap-1.5">
+                    <span>BUDDY</span>
+                    <span className="text-slate-400 font-normal">/</span>
+                    <span className="text-emerald-600 dark:text-emerald-400">VUS</span>
+                  </h1>
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded-md bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 border border-emerald-300 dark:border-emerald-800">
+                    buddy.wasko.org/VUS/
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden sm:block">
+                  Clinician Variant of Uncertain Significance (VUS) Intake & Yeast Conservation Portal
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                onClick={navigateToMain}
+                className="px-3.5 py-1.5 rounded-lg border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5 transition-colors cursor-pointer"
+                title="Return to main BUDDY ortholog analysis and CRISPR modeling platform"
+              >
+                <ChevronLeft className="w-4 h-4" />
+                <span>Main BUDDY Tool</span>
+              </button>
+
+              <button
+                onClick={() => setIsDarkMode(!isDarkMode)}
+                className="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition-colors cursor-pointer"
+                title={isDarkMode ? 'Switch to Light Mode' : 'Switch to Dark Mode'}
+              >
+                {isDarkMode ? <Sun className="w-4 h-4 text-amber-400" /> : <Moon className="w-4 h-4 text-slate-600" />}
+              </button>
+            </div>
+          </div>
+        </header>
+
+        {/* Portal Body */}
+        <main className="w-full max-w-[96%] mx-auto px-4 sm:px-6 lg:px-8 py-8 flex-grow">
+          <ClinicianPortal
+            onLoadVariantInPipeline={handleClinicianVariantSelect}
+            isDarkMode={isDarkMode}
+          />
+        </main>
+
+        {/* Portal Footer */}
+        <footer className="border-t border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/70 py-6 text-center text-xs text-slate-500 space-y-1">
+          <p>
+            BUDDY Clinician Intake Portal • Hosted at <span className="font-mono text-emerald-600 dark:text-emerald-400 font-semibold">buddy.wasko.org/VUS/</span>
+          </p>
+          <p>
+            Target Inbox: <span className="font-mono font-bold text-slate-700 dark:text-slate-300">VUS@wasko.org</span> • Functional yeast modeling protocol
+          </p>
+        </footer>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col bg-slate-50 dark:bg-[#0f172a] text-slate-900 dark:text-slate-100 transition-colors duration-300">
@@ -2821,7 +3346,7 @@ export const App: React.FC = () => {
                                       </button>
                                       <button 
                                           type="button" 
-                                          onClick={() => setSettings({...settings, filtering: {...settings.filtering, clinVarSignificance: ['CONFLICTING']}})}
+                                          onClick={() => setSettings({...settings, filtering: {...settings.filtering, clinVarSignificance: ['CONFLICTING'], conflictingPathBenignOnly: false}})}
                                           className={`px-2 py-0.5 text-[10px] rounded font-medium transition-colors ${
                                               settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING')
                                                   ? 'bg-purple-600 text-white font-bold'
@@ -2829,6 +3354,18 @@ export const App: React.FC = () => {
                                           }`}
                                       >
                                           Conflicting Only
+                                      </button>
+                                      <button 
+                                          type="button" 
+                                          onClick={() => setSettings({...settings, filtering: {...settings.filtering, clinVarSignificance: ['CONFLICTING_PATH_BENIGN'], conflictingPathBenignOnly: true}})}
+                                          className={`px-2 py-0.5 text-[10px] rounded font-medium transition-colors ${
+                                              settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN')
+                                                  ? 'bg-gradient-to-r from-red-600 to-emerald-600 text-white font-bold shadow-xs'
+                                                  : 'bg-purple-100 hover:bg-purple-200 text-purple-900 dark:bg-purple-900/40 dark:text-purple-300'
+                                          }`}
+                                          title="Only show variants with both Pathogenic/Likely Pathogenic AND Benign/Likely Benign submissions (strict major conflict)"
+                                      >
+                                          ⚔️ Path vs Benign
                                       </button>
                                       <button 
                                           type="button" 
@@ -2923,6 +3460,23 @@ export const App: React.FC = () => {
                                             className="rounded text-purple-500 focus:ring-purple-500 bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-600"
                                           />
                                           <span className="font-semibold text-purple-600 dark:text-purple-400">Conflicting interpretations</span>
+                                      </label>
+                                      <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 ml-4 pl-2 border-l-2 border-purple-300 dark:border-purple-700">
+                                          <input 
+                                            type="checkbox" 
+                                            checked={settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN')}
+                                            onChange={(e) => {
+                                                const newSigs = e.target.checked 
+                                                    ? [...settings.filtering.clinVarSignificance, 'CONFLICTING_PATH_BENIGN' as const]
+                                                    : settings.filtering.clinVarSignificance.filter(s => s !== 'CONFLICTING_PATH_BENIGN');
+                                                setSettings({...settings, filtering: {...settings.filtering, clinVarSignificance: newSigs, conflictingPathBenignOnly: e.target.checked}});
+                                            }}
+                                            className="rounded text-purple-600 focus:ring-purple-500 bg-slate-100 dark:bg-slate-800 border-slate-300 dark:border-slate-600"
+                                          />
+                                          <span className="font-semibold text-purple-700 dark:text-purple-300 flex items-center gap-1.5 flex-wrap">
+                                              <span>⚔️ Major Conflicts Only (Path/LP + Benign/LB)</span>
+                                              <span className="text-[11px] font-normal text-slate-500 dark:text-slate-400 italic">(strictly omits Benign + VUS)</span>
+                                          </span>
                                       </label>
                                       <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300">
                                           <input 
@@ -3268,7 +3822,7 @@ export const App: React.FC = () => {
                     <h4>Other info:</h4>
                     <ul>
                     <li> 💡 Tip: Click on any Variant Name (ClinVar), Rare Disease (NIH), or AM Score (AlphaMissense) to open an external database entry.</li>
-                    <li> 🪳 Known bugs: Firefox may timeout with AI Experiment Plan generation, until resolved, if it errors, please try Chrome/Edge or Safari.</li>
+                    <li> 🪳 Known bugs: None currently, but if errors with Firefox are encountered, please try Chrome/Edge or Safari.</li>
                     <li> ✉️ For support, feature requests, bug reports, data sharing, or any other inquiries please <a href="mailto:buddy@wasko.org">email</a>.</li>
                     </ul>
                  </div>
@@ -3317,6 +3871,16 @@ export const App: React.FC = () => {
              >
                 <Scale className="w-4 h-4" />
                 Discordant Variants
+             </button>
+             <button 
+                onClick={() => {
+                    setInputMode('complex');
+                    setShowRareList(false);
+                }}
+                className={`pb-2 text-sm font-medium transition-colors whitespace-nowrap flex items-center gap-1.5 ${inputMode === 'complex' ? 'text-indigo-600 dark:text-indigo-400 border-b-2 border-indigo-500 font-bold' : 'text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200'}`}
+             >
+                <Layers className="w-4 h-4" />
+                Protein Complexes
              </button>
           </div>
 
@@ -3576,16 +4140,32 @@ export const App: React.FC = () => {
                             type="button"
                             onClick={() => setSettings({
                                 ...settings, 
-                                filtering: { ...settings.filtering, clinVarSignificance: ['CONFLICTING'] }
+                                filtering: { ...settings.filtering, clinVarSignificance: ['CONFLICTING'], conflictingPathBenignOnly: false }
                             })}
                             className={`px-2.5 py-1 text-xs rounded-md font-semibold transition-all shadow-sm ${
                                 settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING')
                                     ? 'bg-purple-600 text-white shadow-purple-500/20 font-bold'
                                     : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-600 hover:border-purple-400'
                             }`}
-                            title="Variants with conflicting interpretations only"
+                            title="Variants with conflicting interpretations only (all conflicting variants)"
                         >
                             ● Conflicting Only
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => setSettings({
+                                ...settings, 
+                                filtering: { ...settings.filtering, clinVarSignificance: ['CONFLICTING_PATH_BENIGN'], conflictingPathBenignOnly: true }
+                            })}
+                            className={`px-2.5 py-1 text-xs rounded-md font-semibold transition-all shadow-sm flex items-center gap-1.5 ${
+                                settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN')
+                                    ? 'bg-gradient-to-r from-red-600 to-emerald-600 text-white shadow-purple-500/20 font-bold'
+                                    : 'bg-white dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300 dark:border-slate-600 hover:border-purple-400'
+                            }`}
+                            title="Show only conflicting variants that have entries as BENIGN/LIKELY BENIGN AND PATHOGENIC/LIKELY PATHOGENIC (strictly omits benign + VUS conflicts)"
+                        >
+                            <span>⚔️</span>
+                            <span>Conflicting (Path vs Benign)</span>
                         </button>
                         <button
                             type="button"
@@ -3942,6 +4522,17 @@ export const App: React.FC = () => {
               />
             </div>
           )}
+
+          {inputMode === 'complex' && (
+            <div className="pt-2">
+              <ProteinComplexesExplorer 
+                onSelectGene={handleComplexGeneSelect}
+                onSelectGeneVariant={handleComplexVariantSelect}
+                initialQuery={complexSearchQuery || (geneInfo?.symbol || '')}
+                isDarkMode={isDarkMode}
+              />
+            </div>
+          )}
         </div>
 
         {/* Status Logs - Floating Terminal */}
@@ -3996,7 +4587,7 @@ export const App: React.FC = () => {
             <div className="space-y-8 min-w-0">
               
               {/* Summary Cards */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div ref={summaryCardsRef} className="grid grid-cols-1 sm:grid-cols-2 gap-4 scroll-mt-28">
                 <a 
                     href={geneInfo.uniprot_id ? `https://www.uniprot.org/uniprotkb/${geneInfo.uniprot_id}/entry` : '#'} 
                     target="_blank" rel="noopener noreferrer"
@@ -4006,8 +4597,27 @@ export const App: React.FC = () => {
                   <div className="text-xs text-slate-500 dark:text-slate-400 uppercase tracking-wide font-semibold mb-1">Human Gene</div>
                   <div className="text-xl font-bold text-slate-900 dark:text-slate-100">{geneInfo.symbol}</div>
                   <div className="text-sm text-slate-500 dark:text-slate-400 truncate">{geneInfo.name}</div>
-                  <div className="mt-2 text-xs bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 inline-block px-2 py-1 rounded">
-                    Entrez: {geneInfo.entrez_id}
+                  <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                    <span className="text-xs bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 inline-block px-2 py-1 rounded">
+                      Entrez: {geneInfo.entrez_id}
+                    </span>
+                    {activeGeneComplexes.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          setComplexSearchQuery(geneInfo.symbol);
+                          setInputMode('complex');
+                          window.scrollTo({ top: 120, behavior: 'smooth' });
+                        }}
+                        className="text-xs bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 inline-flex items-center gap-1 px-2 py-1 rounded font-semibold cursor-pointer transition-colors"
+                        title="View multi-protein complexes for this gene in Complex Portal"
+                      >
+                        <Layers className="w-3 h-3 text-indigo-500" />
+                        <span>{activeGeneComplexes.length} {activeGeneComplexes.length === 1 ? 'Complex' : 'Complexes'} ({activeGeneComplexes.map(c => c.assemblyCategory).filter((v, i, a) => a.indexOf(v) === i).join(', ')})</span>
+                      </button>
+                    )}
                   </div>
                 </a>
 
@@ -4051,33 +4661,113 @@ export const App: React.FC = () => {
                 </div>
               )}
 
+              {/* Variant Mutational Landscape Feature Banner */}
+              {alignment && geneInfo && (
+                <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-xl p-4 text-white shadow-md border border-indigo-900/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 rounded-lg bg-indigo-500/20 border border-indigo-400/30 text-indigo-300">
+                      <Dna className="w-6 h-6 text-indigo-400" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-bold text-base text-white flex items-center gap-2">
+                          Variant Mutational Landscape
+                        </h3>
+                        <span className="text-[10px] uppercase font-bold tracking-wider px-2 py-0.5 rounded bg-indigo-500/30 text-indigo-300 border border-indigo-400/30">
+                          Macro View
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        Map all ClinVar variants (Pathogenic, Likely Pathogenic, VUS, Conflicting, Benign) overlaid with AlphaMissense scores and protein domains.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!showLandscapeView) {
+                        setShowLandscapeView(true);
+                        if (landscapeVariants.length === 0) {
+                          loadLandscapeVariants();
+                        }
+                      } else {
+                        setShowLandscapeView(false);
+                      }
+                    }}
+                    className={`px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 transition-all shrink-0 cursor-pointer ${
+                      showLandscapeView
+                        ? 'bg-indigo-600 hover:bg-indigo-700 text-white shadow-md'
+                        : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black shadow-md hover:scale-105'
+                    }`}
+                  >
+                    <Activity className="w-4 h-4" />
+                    <span>
+                      {isLoadingLandscape
+                        ? 'Loading Variants...'
+                        : showLandscapeView
+                        ? 'Hide Landscape View'
+                        : landscapeVariants.length > 0
+                        ? `View Landscape (${landscapeVariants.length} variants)`
+                        : 'Map All Variants (Landscape View)'}
+                    </span>
+                  </button>
+                </div>
+              )}
+
+              {/* Zoomed-Out Variant Mutational Landscape Viewer */}
+              {showLandscapeView && alignment && geneInfo && (
+                <VariantLandscapeViewer
+                  geneSymbol={geneInfo.symbol}
+                  proteinLength={alignment.humanSeqAligned.replace(/-/g, '').length}
+                  variants={landscapeVariants.length > 0 ? landscapeVariants : variants}
+                  proteinDomains={proteinDomains}
+                  functionalSites={functionalSites}
+                  proteinPtms={proteinPtms}
+                  proteinInterfaces={proteinInterfaces}
+                  uniprotId={geneInfo.uniprot_id}
+                  selectedResidue={selectedLandscapeResidue}
+                  onSelectResidue={handleSelectLandscapeResidue}
+                  onJumpToAlignment={handleJumpToAlignmentFromLandscape}
+                  onHighlightStructure={handleHighlightStructureFromLandscape}
+                  onOverlayOnAlignment={(enabled) => setIsOverlayOnAlignmentActive(enabled)}
+                  isOverlayOnAlignmentActive={isOverlayOnAlignmentActive}
+                  isLoading={isLoadingLandscape}
+                  onReload={() => loadLandscapeVariants()}
+                  onClose={() => setShowLandscapeView(false)}
+                  isDarkMode={isDarkMode}
+                />
+              )}
+
               {/* Alignment View */}
               {alignment && (
-                <AlignmentView 
-                    humanSeq={alignment.humanSeqAligned}
-                    yeastSeq={alignment.yeastSeqAligned}
-                    variants={variants}
-                    humanName={geneInfo.symbol}
-                    yeastName={ortholog.symbol}
-                    selectedResidues={selectedVariantIndices.map(idx => variants[idx].residue)}
-                    onResidueClick={handleResidueClick}
-                    humanUniProtId={geneInfo.uniprot_id}
-                    yeastUniProtId={yeastUniProtId}
-                    proteinDomains={proteinDomains}
-                    proteinPtms={proteinPtms}
-                    functionalSites={functionalSites}
-                    proteinInterfaces={proteinInterfaces}
-                    onAddLog={addLog}
-                />
+                <div id="alignment-view-card">
+                  <AlignmentView 
+                      humanSeq={alignment.humanSeqAligned}
+                      yeastSeq={alignment.yeastSeqAligned}
+                      variants={isOverlayOnAlignmentActive && landscapeVariants.length > 0 ? landscapeVariants : variants}
+                      humanName={geneInfo.symbol}
+                      yeastName={ortholog.symbol}
+                      selectedResidues={selectedVariantIndices.map(idx => variants[idx].residue)}
+                      onResidueClick={handleResidueClick}
+                      humanUniProtId={geneInfo.uniprot_id}
+                      yeastUniProtId={yeastUniProtId}
+                      proteinDomains={proteinDomains}
+                      proteinPtms={proteinPtms}
+                      functionalSites={functionalSites}
+                      proteinInterfaces={proteinInterfaces}
+                      onAddLog={addLog}
+                  />
+                </div>
               )}
 
               {/* 3D Structure Viewer  */}
               {(geneInfo.uniprot_id || yeastUniProtId) && (
+                <div id="structure-viewer-card">
                   <StructureViewer 
                       ref={structureViewerRef}
                       humanUniprot={geneInfo.uniprot_id}
                       yeastUniprot={yeastUniProtId}
-                      initialSpecies={manualSearchSpecies === 'yeast' ? 'yeast' : 'human'}
+                      initialSpecies={manualSearchSpecies === 'yeast' ? 'yeast' : 'overlay'}
                       customHighlights={selectedVariantIndices.length > 0 ? selectedVariantIndices.map(idx => ({
                           residue: variants[idx].residue,
                           color: '#ef4444' // Red highlight for mutation
@@ -4094,6 +4784,7 @@ export const App: React.FC = () => {
                       alignmentMap={alignmentMap}
                       onAddLog={addLog}
                   />
+                </div>
               )}
 
               {/* Filtered Variants Table */}
@@ -4115,6 +4806,8 @@ export const App: React.FC = () => {
                             ? 'bg-teal-50 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300 border-teal-200 dark:border-teal-800' :
                         settings.filtering.clinVarSignificance.includes('CONFLICTING') && settings.filtering.clinVarSignificance.length === 1
                             ? 'bg-purple-50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 border-purple-200 dark:border-purple-800' :
+                        settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN') && settings.filtering.clinVarSignificance.length === 1
+                            ? 'bg-gradient-to-r from-red-50 via-purple-50 to-emerald-50 text-purple-900 dark:from-red-950/40 dark:via-purple-950/40 dark:to-emerald-950/40 dark:text-purple-200 border-purple-300 dark:border-purple-700 font-bold' :
                         settings.filtering.clinVarSignificance.length === 2 && settings.filtering.clinVarSignificance.includes('VUS') && settings.filtering.clinVarSignificance.includes('CONFLICTING')
                             ? 'bg-amber-50 text-amber-800 dark:bg-amber-950/40 dark:text-amber-300 border-amber-300 dark:border-amber-700' :
                         settings.filtering.clinVarSignificance.includes('VUS') && settings.filtering.clinVarSignificance.length === 1
@@ -4127,6 +4820,7 @@ export const App: React.FC = () => {
                             settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('LIKELY_PATHOGENIC') ? 'Likely Pathogenic Only' :
                             settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('BENIGN') ? 'Benign Only' :
                             settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('LIKELY_BENIGN') ? 'Likely Benign Only' :
+                            settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN') ? '⚔️ Conflicting (Pathogenic vs Benign Only)' :
                             settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('CONFLICTING') ? 'Conflicting Only' :
                             settings.filtering.clinVarSignificance.length === 1 && settings.filtering.clinVarSignificance.includes('VUS') ? 'VUS Only (Conflicting Omitted)' :
                             settings.filtering.clinVarSignificance.map(s => {
@@ -4135,9 +4829,10 @@ export const App: React.FC = () => {
                                 if (s === 'BENIGN') return 'Benign';
                                 if (s === 'LIKELY_BENIGN') return 'Likely Benign';
                                 if (s === 'CONFLICTING') return 'Conflicting';
+                                if (s === 'CONFLICTING_PATH_BENIGN') return '⚔️ Path vs Benign';
                                 return 'VUS';
                             }).join(' + ')
-                        } {!settings.filtering.clinVarSignificance.includes('CONFLICTING') && settings.filtering.clinVarSignificance.length > 1 ? '(Conflicting Excluded)' : ''}
+                        } {!settings.filtering.clinVarSignificance.includes('CONFLICTING') && !settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN') && settings.filtering.clinVarSignificance.length > 1 ? '(Conflicting Excluded)' : ''}
                     </span>
                     <span className="text-xs font-medium bg-emerald-100 dark:bg-emerald-900/50 text-emerald-600 dark:text-emerald-400 px-2 py-1 rounded-full">
                       {settings.filtering.excludeGaps ? 'Showing Conserved Only' : 'Showing All'}
@@ -4158,6 +4853,36 @@ export const App: React.FC = () => {
                           ×
                         </button>
                       </span>
+                    )}
+                    {variants.some(v => v.isConflictingPathBenign) && (
+                      settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN') ? (
+                        <button
+                          type="button"
+                          onClick={() => setSettings({
+                            ...settings,
+                            filtering: { ...settings.filtering, clinVarSignificance: ['VUS', 'CONFLICTING'], conflictingPathBenignOnly: false }
+                          })}
+                          className="text-xs font-semibold bg-gradient-to-r from-red-600 to-emerald-600 text-white px-2.5 py-1 rounded-full flex items-center gap-1.5 border border-transparent shadow-xs cursor-pointer hover:opacity-90 transition-all"
+                          title="Currently filtering to ONLY conflicting variants with entries as both Pathogenic and Benign. Click to clear and show all variants."
+                        >
+                          <span>⚔️</span>
+                          <span>Showing Path vs Benign Conflicts ({variants.filter(v => v.isConflictingPathBenign).length})</span>
+                          <span className="ml-1 bg-white/20 hover:bg-white/40 text-white rounded-full w-4 h-4 inline-flex items-center justify-center text-[10px] font-bold">×</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setSettings({
+                            ...settings,
+                            filtering: { ...settings.filtering, clinVarSignificance: ['CONFLICTING_PATH_BENIGN'], conflictingPathBenignOnly: true }
+                          })}
+                          className="text-xs font-semibold bg-gradient-to-r from-red-50 via-purple-50 to-emerald-50 hover:from-red-100 hover:to-emerald-100 dark:from-red-950/40 dark:via-purple-950/40 dark:to-emerald-950/40 text-purple-900 dark:text-purple-200 px-2.5 py-1 rounded-full flex items-center gap-1.5 border border-purple-300 dark:border-purple-700 transition-colors shadow-2xs cursor-pointer"
+                          title="Show only conflicting variants that have entries as BENIGN/LIKELY BENIGN AND PATHOGENIC/LIKELY PATHOGENIC (strictly omits benign + VUS conflicts)"
+                        >
+                          <span>⚔️</span>
+                          <span>Show Only Path vs Benign Conflicts ({variants.filter(v => v.isConflictingPathBenign).length})</span>
+                        </button>
+                      )
                     )}
                   </div>
                 </div>
@@ -4205,9 +4930,23 @@ export const App: React.FC = () => {
                                 )}
                             </div>
                         </th>
-                        <th className="px-2.5 py-2 font-small leading-tight">
-                            <div>Variant</div>
-                            <div>Type</div>
+                        <th 
+                            className="px-2.5 py-2 font-small cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800" 
+                            onClick={() => { 
+                                setVariantSortBy('variantType'); 
+                                setVariantSortDirection(variantSortBy === 'variantType' && variantSortDirection === 'desc' ? 'asc' : 'desc'); 
+                            }}
+                            title="Sort by ClinVar clinical significance classification (Click to sort)"
+                        >
+                            <div className="flex items-center justify-between gap-1 leading-tight">
+                                <div>
+                                    <div>Variant</div>
+                                    <div>Type</div>
+                                </div>
+                                {variantSortBy === 'variantType' && (
+                                    <span className="text-emerald-500 ml-0.5">{variantSortDirection === 'asc' ? '↑' : '↓'}</span>
+                                )}
+                            </div>
                         </th>
                         <th 
                             className="px-3 py-3 font-small whitespace-nowrap cursor-pointer hover:bg-slate-200 dark:hover:bg-slate-800"
@@ -4378,17 +5117,27 @@ export const App: React.FC = () => {
                               ) : <span className="text-slate-400 dark:text-slate-500">-</span>}
                           </td>
                           <td className="px-3 py-3 text-slate-800 dark:text-slate-100 whitespace-nowrap">
-                              <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
-                                  v.clinicalSignificance === 'Pathogenic' ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 border border-red-200 dark:border-red-800' :
-                                  v.clinicalSignificance === 'Likely Pathogenic' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300 border border-orange-200 dark:border-orange-800' :
-                                  v.clinicalSignificance === 'Benign' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800' :
-                                  v.clinicalSignificance === 'Likely Benign' ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300 border border-teal-200 dark:border-teal-800' :
-                                  v.clinicalSignificance === 'VUS' ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800' :
-                                  v.clinicalSignificance === 'Conflicting' ? 'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300 border border-purple-200 dark:border-purple-800' :
-                                  'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
-                              }`}>
-                                  {v.clinicalSignificance || 'N/A'}
-                              </span>
+                              {v.isConflictingPathBenign ? (
+                                  <span 
+                                      className="px-2 py-0.5 rounded text-xs font-bold bg-gradient-to-r from-red-100 via-purple-100 to-emerald-100 dark:from-red-950/60 dark:via-purple-950/60 dark:to-emerald-950/60 text-purple-900 dark:text-purple-200 border border-purple-300 dark:border-purple-700 shadow-2xs inline-flex items-center gap-1"
+                                      title={v.conflictingBreakdown?.summary ? `Major Conflict: ${v.conflictingBreakdown.summary}` : "High-Impact Major Conflict: Submissions in ClinVar include both Pathogenic/Likely Pathogenic AND Benign/Likely Benign (strictly omits Benign + VUS)"}
+                                  >
+                                      <span>⚔️</span>
+                                      <span>Conflicting (Path/Benign)</span>
+                                  </span>
+                              ) : (
+                                  <span className={`px-2 py-0.5 rounded text-xs font-semibold ${
+                                      v.clinicalSignificance === 'Pathogenic' ? 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300 border border-red-200 dark:border-red-800' :
+                                      v.clinicalSignificance === 'Likely Pathogenic' ? 'bg-orange-100 text-orange-800 dark:bg-orange-900/40 dark:text-orange-300 border border-orange-200 dark:border-orange-800' :
+                                      v.clinicalSignificance === 'Benign' ? 'bg-emerald-100 text-emerald-800 dark:bg-emerald-900/40 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800' :
+                                      v.clinicalSignificance === 'Likely Benign' ? 'bg-teal-100 text-teal-800 dark:bg-teal-900/40 dark:text-teal-300 border border-teal-200 dark:border-teal-800' :
+                                      v.clinicalSignificance === 'VUS' ? 'bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300 border border-amber-200 dark:border-amber-800' :
+                                      v.clinicalSignificance === 'Conflicting' ? 'bg-purple-100 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300 border border-purple-200 dark:border-purple-800' :
+                                      'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300'
+                                  }`}>
+                                      {v.clinicalSignificance || 'N/A'}
+                                  </span>
+                              )}
                           </td>
                           <td className="px-3 py-3">
                               {(() => {
@@ -4588,26 +5337,43 @@ export const App: React.FC = () => {
                           </td>
                         </tr>
                       ))}
-                      {variants.length === 0 && (
+                      {sortedAndMappedVariants.length === 0 && (
                         <tr>
                           <td colSpan={14} className="px-6 py-8 text-center text-slate-500">
-                            No variants found matching criteria.
+                            {settings.filtering.clinVarSignificance.includes('CONFLICTING_PATH_BENIGN') ? (
+                              <div className="flex flex-col items-center justify-center gap-2">
+                                <p className="font-semibold text-slate-700 dark:text-slate-300">No Major Conflicting variants (Pathogenic/Likely Pathogenic AND Benign/Likely Benign) found in this query.</p>
+                                <p className="text-xs text-slate-400">All conflicting entries for this gene may be discordant VUS/Benign or VUS/Pathogenic.</p>
+                                <button
+                                  type="button"
+                                  onClick={() => setSettings({
+                                    ...settings,
+                                    filtering: { ...settings.filtering, clinVarSignificance: ['VUS', 'CONFLICTING'], conflictingPathBenignOnly: false }
+                                  })}
+                                  className="mt-2 text-xs font-semibold px-3 py-1.5 rounded-md bg-purple-100 hover:bg-purple-200 text-purple-800 dark:bg-purple-900/40 dark:text-purple-300 transition-colors"
+                                >
+                                  Reset to All Conflicting + VUS
+                                </button>
+                              </div>
+                            ) : (
+                              'No variants found matching criteria.'
+                            )}
                           </td>
                         </tr>
                       )}
                     </tbody>
                   </table>
                 </div>
-                {visibleVariantsCount < variants.length && (
+                {visibleVariantsCount < sortedAndMappedVariants.length && (
                     <div className="flex border-t border-slate-200 dark:border-slate-700">
                         <button 
                             onClick={handleShowMore}
                             className="flex-1 py-3 bg-slate-50 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800 text-emerald-600 dark:text-emerald-400 font-medium text-sm transition-colors border-r border-slate-200 dark:border-slate-700"
                         >
-                            Show 20 More ({variants.length - visibleVariantsCount} remaining)
+                            Show 20 More ({sortedAndMappedVariants.length - visibleVariantsCount} remaining)
                         </button>
                         <button 
-                            onClick={() => setVisibleVariantsCount(variants.length)}
+                            onClick={() => setVisibleVariantsCount(sortedAndMappedVariants.length)}
                             className="flex-1 py-3 bg-slate-50 hover:bg-slate-100 dark:bg-slate-900 dark:hover:bg-slate-800 text-emerald-600 dark:text-emerald-400 font-medium text-sm transition-colors"
                         >
                             Show All
@@ -4704,26 +5470,53 @@ export const App: React.FC = () => {
                         </div>
                       </div>
 
+                      {/* Inviable / Essential Gene Alert Banner if present */}
+                      {phenotypes.some(p => /\binviable\b|\blethal\b/i.test(p.phenotype)) && (
+                        <div className="flex items-start gap-2.5 p-3 bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 rounded-lg text-xs text-red-800 dark:text-red-200">
+                          <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0 mt-0.5" />
+                          <div className="space-y-0.5">
+                            <span className="font-bold uppercase tracking-wider text-[11px] text-red-700 dark:text-red-300 block">
+                              ⚠️ Essential Gene Warning: Inviable Phenotype Detected
+                            </span>
+                            <p className="leading-relaxed">
+                              This yeast gene has <strong className="font-semibold underline">inviable</strong> listed among its loss-of-function phenotypes, indicating it is an essential gene. If modeled human variants cause severe <strong>Loss-of-Function (LoF)</strong> or null mutations, haploid CRISPR knock-in strains may be <strong>lethal/inviable</strong>. Consider diploid modeling, heterozygous knock-in, or plasmid shuffle (5-FOA) complementation strategies.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Phenotype Buttons */}
                       <div className="flex flex-wrap gap-2">
                         {displayedPhenotypes.length > 0 ? displayedPhenotypes.map((p, i) => {
                           const isClassic = p.studyType === 'classic' || (!p.hasHighThroughput && p.hasClassic);
                           const isHt = p.studyType === 'high-throughput' || (!p.hasClassic && p.hasHighThroughput);
                           const isBoth = p.studyType === 'both' || (p.hasClassic && p.hasHighThroughput);
+                          const isInviable = /\binviable\b|\blethal\b/i.test(p.phenotype);
 
                           return (
                             <button 
                                 key={i} 
                                 onClick={() => togglePhenotypeSelection(p.phenotype)}
-                                title={`Study Origin: ${p.studyTypeLabel || (isBoth ? 'Both Classic & High-Throughput' : isClassic ? 'Classic Targeted' : 'High-Throughput')}${p.reference ? ` | Ref: ${p.reference}` : ''}`}
+                                title={isInviable 
+                                  ? `CRITICAL: Inviable phenotype indicates essential gene! If variants are LoF, haploid knock-ins may be lethal. | Study: ${p.studyTypeLabel || 'SGD/AGR'}`
+                                  : `Study Origin: ${p.studyTypeLabel || (isBoth ? 'Both Classic & High-Throughput' : isClassic ? 'Classic Targeted' : 'High-Throughput')}${p.reference ? ` | Ref: ${p.reference}` : ''}`}
                                 className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all flex items-center gap-1.5 ${
                                     selectedPhenotype === p.phenotype 
-                                    ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm' 
-                                    : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200 dark:border-slate-600 dark:hover:bg-slate-600 dark:hover:border-slate-500'
+                                    ? isInviable
+                                      ? 'bg-red-600 text-white border-red-500 shadow-md ring-2 ring-red-400 font-bold'
+                                      : 'bg-emerald-600 text-white border-emerald-500 shadow-sm' 
+                                    : isInviable
+                                      ? 'bg-red-50 text-red-700 border-red-300 hover:bg-red-100 hover:border-red-400 dark:bg-red-950/40 dark:text-red-200 dark:border-red-800 dark:hover:bg-red-900/60 font-bold shadow-xs'
+                                      : 'bg-slate-100 text-slate-700 border-slate-200 hover:bg-slate-200 dark:bg-slate-700 dark:text-slate-200 dark:border-slate-600 dark:hover:bg-slate-600 dark:hover:border-slate-500'
                                 }`}
                             >
+                              {isInviable && <AlertCircle className="w-3.5 h-3.5 text-red-600 dark:text-red-400 shrink-0" />}
                               <span>{p.phenotype}</span>
-                              {isBoth ? (
+                              {isInviable ? (
+                                <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${selectedPhenotype === p.phenotype ? 'bg-red-700 text-white' : 'bg-red-200 text-red-900 dark:bg-red-900 dark:text-red-100 border border-red-300 dark:border-red-700'}`}>
+                                  Lethal / LoF
+                                </span>
+                              ) : isBoth ? (
                                 <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${selectedPhenotype === p.phenotype ? 'bg-teal-500 text-white' : 'bg-teal-100 text-teal-800 dark:bg-teal-900/60 dark:text-teal-300'}`}>
                                   Classic & HT
                                 </span>
@@ -4762,16 +5555,36 @@ export const App: React.FC = () => {
                   const isClassic = activePheno.studyType === 'classic' || (!activePheno.hasHighThroughput && activePheno.hasClassic);
                   const isHt = activePheno.studyType === 'high-throughput' || (!activePheno.hasClassic && activePheno.hasHighThroughput);
                   const isBoth = activePheno.studyType === 'both' || (activePheno.hasClassic && activePheno.hasHighThroughput);
+                  const isActiveInviable = /\binviable\b|\blethal\b/i.test(activePheno.phenotype);
 
                   return (
-                    <div className="mt-4 p-4 bg-emerald-50/90 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 rounded-xl space-y-3 animate-fade-in text-xs shadow-sm">
+                    <div className={`mt-4 p-4 rounded-xl space-y-3 animate-fade-in text-xs shadow-sm border ${
+                      isActiveInviable 
+                        ? 'bg-red-50/95 dark:bg-red-950/40 border-red-300 dark:border-red-800' 
+                        : 'bg-emerald-50/90 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800'
+                    }`}>
                       {/* Top Header: Phenotype Name & Close Button */}
-                      <div className="flex items-start justify-between gap-2 border-b border-emerald-200/70 dark:border-emerald-800/70 pb-2.5">
+                      <div className={`flex items-start justify-between gap-2 pb-2.5 border-b ${
+                        isActiveInviable ? 'border-red-200/80 dark:border-red-800/80' : 'border-emerald-200/70 dark:border-emerald-800/70'
+                      }`}>
                         <div className="space-y-1">
-                          <div className="font-semibold text-emerald-900 dark:text-emerald-100 flex items-center gap-1.5 flex-wrap">
-                            <BookOpen className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                          <div className={`font-semibold flex items-center gap-1.5 flex-wrap ${
+                            isActiveInviable ? 'text-red-900 dark:text-red-100' : 'text-emerald-900 dark:text-emerald-100'
+                          }`}>
+                            {isActiveInviable ? (
+                              <AlertCircle className="w-4 h-4 text-red-600 dark:text-red-400 shrink-0" />
+                            ) : (
+                              <BookOpen className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                            )}
                             <span>Selected Phenotype:</span>
-                            <span className="text-emerald-800 dark:text-emerald-200 font-bold text-sm">{activePheno.phenotype}</span>
+                            <span className={`font-bold text-sm ${
+                              isActiveInviable ? 'text-red-700 dark:text-red-300' : 'text-emerald-800 dark:text-emerald-200'
+                            }`}>{activePheno.phenotype}</span>
+                            {isActiveInviable && (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-red-600 text-white uppercase tracking-wider">
+                                Essential Gene / Lethal LoF Risk
+                              </span>
+                            )}
                           </div>
 
                           {/* Study Origin Badge & Explanation */}
@@ -4799,6 +5612,18 @@ export const App: React.FC = () => {
                               )}
                             </span>
                           </div>
+
+                          {/* Inviable LoF Lethality Alert Box */}
+                          {isActiveInviable && (
+                            <div className="mt-2 p-2.5 bg-red-100/80 dark:bg-red-900/40 border border-red-300 dark:border-red-700 rounded-lg text-red-900 dark:text-red-100 space-y-1">
+                              <span className="font-bold flex items-center gap-1 text-[11px]">
+                                ⚠️ Crucial Experimental Note: Gene Essentiality & Loss-of-Function Lethality
+                              </span>
+                              <p className="leading-relaxed text-[11px] text-red-800 dark:text-red-200">
+                                Because <em>{ortholog?.symbol || 'this yeast ortholog'}</em> is annotated with an inviable null phenotype, complete loss-of-function (LoF) human variants will likely prevent colony formation or viability in haploid yeast. When generating the AI plan or conducting wet-lab assays, ensure you consider heterozygous transformation in diploids, conditional expression, or plasmid shuffling with wild-type complementation.
+                              </p>
+                            </div>
+                          )}
                         </div>
                         
                         <button
@@ -5351,6 +6176,13 @@ export const App: React.FC = () => {
         )}
       </main>
       
+      {/* Footer */}
+      <footer className="border-t border-slate-200 dark:border-slate-800 bg-white/60 dark:bg-slate-900/60 py-6 text-center text-xs text-slate-500 print:hidden space-y-1">
+        <p>BUDDY — Functional Genomics Platform for Human-to-Yeast Ortholog Modeling</p>
+        <p className="text-[11px] text-slate-400">
+          Support & Inquiries: <a href="mailto:buddy@wasko.org" className="underline hover:text-emerald-500">buddy@wasko.org</a> • Clinician Intake Portal: <button onClick={navigateToVus} className="font-mono underline hover:text-emerald-500 cursor-pointer">buddy.wasko.org/VUS/</button>
+        </p>
+      </footer>
     </div>
   );
 };

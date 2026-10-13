@@ -30,6 +30,7 @@
     "jspdf": "^3.0.4",
     "lucide-react": "^0.555.0",
     "ml-matrix": "^6.12.1",
+    "nodemailer": "^10.0.16",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-markdown": "^10.1.0",
@@ -38,5 +39,7 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/nodemailer": "^8.0.2"
+  }
 }

@@ -140,6 +140,19 @@ export const generateExperimentalPlan = async (
   }
 
   let phenotypeContext = `Yeast LOF Phenotypes: ${phenoText}`;
+
+  // Check if any listed phenotype indicates inviability or essentiality
+  const hasInviablePhenotype = phenotypes.some(p => /\binviable\b|\blethal\b/i.test(p.phenotype));
+  if (hasInviablePhenotype) {
+      phenotypeContext += `\n\n⚠️ [CRITICAL GENE ESSENTIALITY / INVIABILITY ALERT]:
+The yeast gene "${yeastGene}" has "inviable" listed among its loss-of-function phenotypes, indicating that this gene is essential for yeast viability.
+MANDATORY INSTRUCTION FOR ALL SECTIONS:
+- You MUST explicitly warn and notify the user of this potential issue: if the human variants being modeled are severe Loss-of-Function (LoF) or null mutations, haploid CRISPR knock-ins may be LETHAL / INVIABLE because the gene is essential.
+- In Section 1 (GENE FUNCTION & UTILITY ASSESSMENT), prominently highlight this essentiality/inviability risk.
+- In Section 2 (EXPERIMENTAL ASSAY PROPOSAL) & Section 3 (CONTROLS), address how to handle this essentiality (e.g., maintaining a plasmid-borne wild-type copy for 5-FOA plasmid shuffling, using diploid strains for heterozygous knock-in followed by sporulation/tetrad dissection, or testing conditional/temperature-sensitive alleles).
+- In Section 4 (EXECUTIVE SUMMARY / TL;DR), dedicate an explicit bullet point warning that "${yeastGene}" is an essential gene (null is inviable) and that LoF variants risk causing lethality unless diploid or plasmid-shuffle recovery strategies are implemented.`;
+  }
+
   if (selectedPhenotype) {
       const activeObj = phenotypes.find(p => p.phenotype === selectedPhenotype);
       const studyInfo = activeObj?.studyTypeLabel ? ` [Study Origin: ${activeObj.studyTypeLabel}]` : '';
@@ -198,6 +211,7 @@ const prompt = `
     - Use precise, objective scientific language. 
     - Express appropriate uncertainty (e.g., "suggests", "hypothesized") when dealing with vague phenotypes, ambiguous AlphaMissense scores, or low DIOPT scores.
     - **MANDATORY GROUNDING:** You must use Web Search to cross-reference primary scientific literature. Always include complete, inline citations for specific findings, chemicals, and protocols.
+    - **DEEP MUTATIONAL SCANNING (DMS) GROUNDED SEARCH:** You must perform a targeted web search for deep mutational scanning (DMS), saturation mutagenesis screens, multiplexed assays of variant effect (MAVE), or MaveDB datasets for both the human gene ${humanGene} AND its yeast ortholog ${yeastGene} (e.g. searching for "${humanGene} deep mutational scanning", "${humanGene} MaveDB", as well as "${yeastGene} deep mutational scanning", "${yeastGene} saturation mutagenesis"). If present, evaluate and note them in the response with regard to the potential that the variant has already been modeled or characterized in that manner.
 
     **INPUT CONTEXT:**
     - Human Gene: ${humanGene}
@@ -212,28 +226,35 @@ const prompt = `
     Generate the response using the following ALL CAPS sections, separated by horizontal rules (---).
 
     ### 1. GENE FUNCTION & UTILITY ASSESSMENT
-    * **Human & Yeast Function:** Briefly summarize the human gene's function. In the next paragraph, concisely describe the yeast gene's function (noting if it is essential).
+    * **Human & Yeast Function:** Briefly summarize the human gene's function. In the next paragraph, concisely describe the yeast gene's function (noting if it is essential).${hasInviablePhenotype ? `
+    * **CRITICAL LETHALITY / ESSENTIAL GENE NOTIFICATION:** ${yeastGene} is annotated with an "inviable" phenotype for null/loss-of-function mutants, meaning this gene is essential for viability. You MUST prominently notify the user of this potential issue: if the human variants being modeled are Loss-of-Function (LoF) mutations, haploid CRISPR knock-ins may be LETHAL. Explain that haploid cells may fail to grow or form colonies unless diploid modeling, heterozygous knock-in, or plasmid-shuffle (5-FOA counterselection) complementation strategies are used.` : ''}
     * **Modeling Utility:** **Bold your assessment** of the utility of modeling this human variant in yeast. Base this strictly on protein identity/similarity, local homology, DIOPT score (Note: DIOPT of 1 is very low), and structural image data (if provided). If the data suggests poor conservation, explicitly advise against using the yeast model. Mention if literature indicates the human gene successfully complements the yeast null mutant.
     * **Variant Assessment:** Perform a web search on the specific variant of unknown significance (VUS). Summarize any found primary literature. If no literature is found, state this clearly. Conclude with a hypothesized impact of the VUS based on the AlphaMissense score, structural data, and the provided **Site and Domain annotations at the variant position** (evaluate if the mutation disrupts an annotated catalytic active site, metal/ligand-binding pocket, SLiM motif, post-translational modification, 3D interaction interface, or critical protein domain). 
+    * **Deep Mutational Scanning (DMS) & High-Throughput Functional Maps:** Perform a grounded web search specifically for deep mutational scanning (DMS) experiments, saturation mutagenesis studies, or MaveDB entries about the human gene ${humanGene} AND the yeast ortholog ${yeastGene} (e.g. humanized yeast complementation DMS screens, saturation genome editing, or yeast DMS libraries/functional maps for ${yeastGene}). If any DMS experiments exist:
+      - Cite the published DMS study/dataset (authors, journal/year, or MaveDB ID) for ${humanGene} and/or ${yeastGene}.
+      - Note whether this specific variant, the equivalent orthologous codon position in ${yeastGene}, or neighboring conserved residues were tested in the DMS screen and what functional score / loss-of-function effect was observed.
+      - Explicitly discuss the potential that the variant has already been modeled in that manner: if solid DMS data exists (either directly for the human variant or comprehensively mapped in the orthologous yeast gene), explain whether prospective single-variant CRISPR modeling is corroborative or redundant; if the variant was absent from the DMS library, uncharacterized, or yielded ambiguous scores, emphasize the high value of targeted prospective yeast modeling.
+      - If no DMS experiments exist for either gene, explicitly state that no deep mutational scanning datasets were identified on PubMed or MaveDB for ${humanGene} or ${yeastGene}.
     * **Rare Disease Context:** If your search associates the variant with a rare disease, briefly explain the disease in lay terms.
 
     ---
     ### 2. EXPERIMENTAL ASSAY PROPOSAL
-    * **Methodology:** Exclusively propose assays evaluating the CRISPR-mediated knock-in of the variant at the native yeast locus. 
+    * **Methodology:** Exclusively propose assays evaluating the CRISPR-mediated knock-in of the variant at the native yeast locus. ${hasInviablePhenotype ? `Because ${yeastGene} has an inviable phenotype (essential gene), specifically address strain background viability: recommend performing CRISPR knock-ins in a diploid strain (generating a heterozygous variant) followed by tetrad dissection, or utilizing a plasmid shuffle system (pRS316-URA3 wild-type complementation chased by 5-FOA), so that severe LoF mutations can be recovered and scored for lethality/growth defects.` : ''}
     * **Assay Design:** Select the most appropriate assay based on the Safety Constraints and Lab Context provided. ${phenotypeInstructions ? ` ${phenotypeInstructions}` : ' You MUST preferentially select "classical genetics" phenotypes over "large-scale survey" phenotypes.'} Integrate the variant's site and domain context (e.g., active site, interaction interface, ligand-binding, or PTM site) into your rationale for why the chosen phenotypic readout or assay conditions are mechanistically appropriate.
     * **Specific Conditions:** If web search revealed specific chemical agents, ions, or conditions related to the phenotype, explicitly state them and cite the source paper inline. Explicitly state the source reference for the chosen phenotype (e.g., "Based on Smith et al., 2010").
 
     ---
     ### 3. EXPECTED RESULTS & CONTROLS
-    * **Expected Outcomes:** Briefly discuss the potential assay readouts and how to interpret them.
+    * **Expected Outcomes:** Briefly discuss the potential assay readouts and how to interpret them.${hasInviablePhenotype ? ` If the variant is a loss-of-function mutation, explicitly describe the expected lethal or severely compromised growth phenotype.` : ''}
     * **Controls:** Explicitly define the controls. Use the CRISPR-generated 2bp PAM deletion mutant (frameshift/null) as the negative control, and the Wild Type strain as the positive control.
 
     ---
     ### 4. EXECUTIVE SUMMARY (TL;DR)
     Provide a 4-5 bullet point summary.
-    * Bullet 1: The assessment of modeling utility in yeast.
+    * Bullet 1: The assessment of modeling utility in yeast.${hasInviablePhenotype ? ` MUST include an explicit notice: ⚠️ Warning: ${yeastGene} is an essential gene (inviable null phenotype); if the variant is a severe Loss-of-Function (LoF) mutation, it may be lethal in haploid yeast.` : ''}
     * Bullet 2: The predicted impact of the VUS on protein function, highlighting any affected functional site, domain, PTM, or interaction interface.
-    * Bullets 3-5: Key takeaways regarding the assay and expected outcomes.
+    * Bullet 3: Deep mutational scanning (DMS) status: note whether high-throughput DMS / MaveDB data exists for ${humanGene} or ${yeastGene} and whether this variant (or orthologous yeast residue) has already been modeled in that manner.
+    * Bullets 4-5: Key takeaways regarding the assay and expected outcomes.
 
     ---
     ### 5. DISCLAIMER

@@ -74,3 +74,10 @@ Thumbs.db
 
 # Misc & Local Overrides
 *.local
+
+# Clinician Portal specific configuration & submissions (specific to Dr. Wasko)
+clinician_portal.config.json
+clinician_submissions.json
+data/clinician_submissions.json
+*.clinician.json
+clinician_*.json

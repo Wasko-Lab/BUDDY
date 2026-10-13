@@ -186,15 +186,33 @@ export const parseProteinChange = (pChange: string): ParsedProteinChange | null 
   if (!pChange || typeof pChange !== 'string') return null;
   const str = pChange.trim();
 
+  // Explicitly reject Termination / Nonsense mutations (Ter, *, ext, fs, del, dup, ins)
+  if (
+    /\bTer\b/i.test(str) ||
+    str.includes('*') ||
+    /\bdel\b/i.test(str) ||
+    /\bins\b/i.test(str) ||
+    /\bdup\b/i.test(str) ||
+    /\bfs\b/i.test(str) ||
+    /\bext\b/i.test(str) ||
+    /\bX\b/.test(str)
+  ) {
+    return null;
+  }
+
   // Format 1: 3-letter AA, e.g. p.Arg114Gln, Arg114Gln, NP_00123.1:p.Arg114Gln, (p.Arg114Gln)
   const match3 = str.match(/(?:^|[^a-zA-Z])p?\.?([A-Z][a-z]{2})(\d+)([A-Z][a-z]{2})(?:[^a-zA-Z]|$)/);
   if (match3) {
     const ref3 = match3[1];
     const res = parseInt(match3[2], 10);
     const tgt3 = match3[3];
+
+    // Exclude termination mutations
+    if (ref3 === 'Ter' || tgt3 === 'Ter') return null;
+
     const ref = AA_MAP[ref3] || '?';
     const target = AA_MAP[tgt3] || '?';
-    if (!isNaN(res) && res > 0) {
+    if (!isNaN(res) && res > 0 && ref !== '?' && target !== '?' && ref !== target && ref !== '*' && target !== '*') {
       return {
         ref,
         res,
@@ -210,9 +228,15 @@ export const parseProteinChange = (pChange: string): ParsedProteinChange | null 
     const ref = match1[1];
     const res = parseInt(match1[2], 10);
     const target = match1[3];
+
+    // Exclude stop/nonsense
+    if (ref === 'X' || target === 'X' || ref === '*' || target === '*') return null;
+
     const ref3 = ONE_TO_THREE_AA[ref] || ref;
     const tgt3 = ONE_TO_THREE_AA[target] || target;
-    if (!isNaN(res) && res > 0) {
+    if (ref3 === 'Ter' || tgt3 === 'Ter') return null;
+
+    if (!isNaN(res) && res > 0 && ref3 && tgt3 && ref !== target) {
       return {
         ref,
         res,
@@ -242,7 +266,8 @@ export interface ResolvedClinVarProteinChange {
  */
 export const resolveClinVarProteinChange = (
   hit: any,
-  canonicalSeq?: string
+  canonicalSeq?: string,
+  geneSymbol?: string
 ): ResolvedClinVarProteinChange | null => {
   if (!hit) return null;
   const clinVarEntry = Array.isArray(hit.clinvar) ? hit.clinvar[0] : hit.clinvar;
@@ -314,11 +339,27 @@ export const resolveClinVarProteinChange = (
     // Prefer RefSeq curated NP_ transcript if available in clinvar_hgvs
     if (c.raw.startsWith('NP_')) score += 5;
 
+    // Reject or heavily penalize candidates that explicitly belong to an overlapping different gene (e.g. WRAP53 on TP53)
+    if (geneSymbol && c.raw.includes('(')) {
+      const matchGene = c.raw.match(/\(([A-Za-z0-9_-]+)\)/);
+      if (matchGene && matchGene[1].toUpperCase() !== geneSymbol.toUpperCase()) {
+        score -= 2000;
+      }
+    }
+
     return { ...c, isSeqMatch, score };
   });
 
-  scored.sort((a, b) => b.score - a.score);
-  const best = scored[0];
+  // Filter candidates that belong to wrong overlapping genes
+  const validCandidates = scored.filter(c => c.score > -1000);
+  const pool = validCandidates.length > 0 ? validCandidates : scored;
+
+  // If canonicalSeq is provided and any candidate matches the canonical sequence, ONLY consider matching candidates
+  const matchingCandidates = pool.filter(c => c.isSeqMatch);
+  const candidatesToRank = (canonicalSeq && matchingCandidates.length > 0) ? matchingCandidates : pool;
+
+  candidatesToRank.sort((a, b) => b.score - a.score);
+  const best = candidatesToRank[0];
 
   return {
     raw: best.raw,

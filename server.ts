@@ -6,6 +6,7 @@ import path from 'path';
 import Database from 'better-sqlite3';
 import fs from 'fs';
 import rateLimit from 'express-rate-limit';
+import nodemailer from 'nodemailer';
 
 interface TsvRecord {
   Gene_Name: string;
@@ -33,8 +34,14 @@ try {
 
 let tsvDb: TsvRecord[] | null = null;
 try {
-  const tsvPath = path.join(process.cwd(), 'data', 'SGDphenotypes.tsv');
-  if (fs.existsSync(tsvPath)) {
+  // Support both lowercase 'data' and uppercase 'Data' folder casing
+  const possiblePaths = [
+    path.join(process.cwd(), 'data', 'SGDphenotypes.tsv'),
+    path.join(process.cwd(), 'Data', 'SGDphenotypes.tsv')
+  ];
+  const tsvPath = possiblePaths.find(p => fs.existsSync(p));
+
+  if (tsvPath) {
     const fileContent = fs.readFileSync(tsvPath, 'utf-8');
     const lines = fileContent.split(/\r?\n/);
     if (lines.length > 1) {
@@ -51,17 +58,18 @@ try {
         }
         tsvDb.push(record as TsvRecord);
       }
-      console.log(`Loaded ${tsvDb.length} records from SGDphenotypes.tsv`);
+      console.log(`Loaded ${tsvDb.length} backup records from ${tsvPath}`);
     }
   } else {
-    console.log("Local TSV database not found.");
+    console.log("Backup TSV database (data/SGDphenotypes.tsv) not found.");
   }
 } catch (error) {
   console.error("Failed to load TSV database.", error);
 }
 
-// In-memory orthology mapping for Discordant Variant search
+// In-memory orthology mapping for Discordant Variant search and Complex subunit mapping
 const orthologMap = new Map<string, { symbol: string; dioptScore: number }>();
+const yeastToHumanOrthologMap = new Map<string, string[]>();
 try {
   const orthPath = path.join(process.cwd(), 'data', 'YeastHuman_Orthologs_Summary.tsv');
   if (fs.existsSync(orthPath)) {
@@ -72,15 +80,162 @@ try {
       const [h, y, sc] = line.split('\t');
       if (!h || !y) continue;
       const hUpper = h.trim().toUpperCase();
+      const yUpper = y.trim().toUpperCase();
       const score = parseInt(sc || '0', 10);
       if (!orthologMap.has(hUpper) || (orthologMap.get(hUpper)?.dioptScore ?? 0) < score) {
-        orthologMap.set(hUpper, { symbol: y.trim().toUpperCase(), dioptScore: score });
+        orthologMap.set(hUpper, { symbol: yUpper, dioptScore: score });
       }
+      if (!yeastToHumanOrthologMap.has(yUpper)) {
+        yeastToHumanOrthologMap.set(yUpper, []);
+      }
+      const existing = yeastToHumanOrthologMap.get(yUpper)!;
+      if (!existing.includes(hUpper)) existing.push(hUpper);
     }
-    console.log(`Loaded ${orthologMap.size} yeast-human ortholog mappings for discordant variants.`);
+    console.log(`Loaded ${orthologMap.size} yeast-human ortholog mappings and ${yeastToHumanOrthologMap.size} reverse mappings.`);
   }
 } catch (e) {
   console.warn("Failed to load ortholog summary TSV in server.ts:", e);
+}
+
+// --- Complex Portal Database & Indexing ---
+interface ComplexParticipantRecord {
+  identifier: string;
+  symbol: string;
+  stoichiometry: number;
+  allGeneNames?: string[];
+}
+
+interface ProteinComplexRecord {
+  complexId: string;
+  name: string;
+  aliases: string[];
+  taxonomyId: string;
+  species: 'human' | 'yeast';
+  assembly: string;
+  assemblyCategory: 'Dimer' | 'Trimer' | 'Tetramer' | 'Pentamer' | 'Hexamer' | 'Heptamer' | 'Octamer' | 'Multimer' | 'Other';
+  totalSubunits: number;
+  distinctSubunits: number;
+  participants: ComplexParticipantRecord[];
+  description: string;
+  properties: string;
+  goAnnotations: string[];
+  crossReferences: string[];
+  evidence: string;
+}
+
+const allComplexes: ProteinComplexRecord[] = [];
+const complexGeneIndex = new Map<string, ProteinComplexRecord[]>();
+const complexIdMap = new Map<string, ProteinComplexRecord>();
+
+function categorizeAssembly(assembly: string, totalSubunits: number): 'Dimer' | 'Trimer' | 'Tetramer' | 'Pentamer' | 'Hexamer' | 'Heptamer' | 'Octamer' | 'Multimer' | 'Other' {
+  const norm = (assembly || '').toLowerCase().trim();
+  if (norm.includes('dimer') || totalSubunits === 2) return 'Dimer';
+  if (norm.includes('trimer') || totalSubunits === 3) return 'Trimer';
+  if (norm.includes('tetramer') || norm.includes('teramer') || totalSubunits === 4) return 'Tetramer';
+  if (norm.includes('pentamer') || totalSubunits === 5) return 'Pentamer';
+  if (norm.includes('hexamer') || totalSubunits === 6) return 'Hexamer';
+  if (norm.includes('heptamer') || totalSubunits === 7) return 'Heptamer';
+  if (norm.includes('octamer') || norm.includes('octomer') || totalSubunits === 8) return 'Octamer';
+  if (norm.includes('dodecamer') || norm.includes('nonamer') || norm.includes('decamer') || norm.includes('oligomer') || norm.includes('-mer') || norm.includes(' mer') || totalSubunits > 8) return 'Multimer';
+  return 'Other';
+}
+
+try {
+  let proteinSymbolsMap: Record<string, any> = {};
+  const mapPath = path.join(process.cwd(), 'data', 'complex_protein_symbols.json');
+  if (fs.existsSync(mapPath)) {
+    proteinSymbolsMap = JSON.parse(fs.readFileSync(mapPath, 'utf-8'));
+  }
+
+  function parseComplexesFile(fname: string, species: 'human' | 'yeast', taxId: string) {
+    const filePath = path.join(process.cwd(), 'data', fname);
+    if (!fs.existsSync(filePath)) return [];
+    const content = fs.readFileSync(filePath, 'utf-8');
+    const lines = content.split(/\r?\n/).filter(l => l.trim() && !l.startsWith('#'));
+    const records: ProteinComplexRecord[] = [];
+    for (const line of lines) {
+      const cols = line.split('\t');
+      const complexId = cols[0]?.trim();
+      if (!complexId) continue;
+      const name = cols[1]?.trim() || '';
+      const aliases = cols[2] && cols[2] !== '-' ? cols[2].split('|').map(s => s.trim()) : [];
+      const rawParticipants = cols[4] || '';
+      const parts = rawParticipants.split('|');
+      const participants: ComplexParticipantRecord[] = [];
+      let totalSubunits = 0;
+      for (const p of parts) {
+        const m = p.match(/^([A-Za-z0-9_-]+)(?:\((\d+)\))?$/);
+        if (m) {
+          const id = m[1];
+          const stoich = parseInt(m[2] || '0', 10);
+          totalSubunits += stoich;
+          const entry = proteinSymbolsMap[id];
+          participants.push({
+            identifier: id,
+            symbol: entry?.symbol || id,
+            allGeneNames: entry?.allGenes || [],
+            stoichiometry: stoich
+          });
+        }
+      }
+      const rawAssembly = cols[11]?.trim() || '-';
+      const effectiveSubunits = totalSubunits > 0 ? totalSubunits : participants.length;
+      let assembly = rawAssembly !== '-' ? rawAssembly : '';
+      if (!assembly || assembly === '-') {
+        if (effectiveSubunits === 2) assembly = participants.length === 1 ? 'Homodimer' : 'Heterodimer';
+        else if (effectiveSubunits === 3) assembly = participants.length === 1 ? 'Homotrimer' : 'Heterotrimer';
+        else if (effectiveSubunits === 4) assembly = participants.length === 1 ? 'Homotetramer' : 'Heterotetramer';
+        else if (effectiveSubunits === 5) assembly = 'Heteropentamer';
+        else if (effectiveSubunits === 6) assembly = 'Heterohexamer';
+        else if (effectiveSubunits > 6) assembly = 'Heteromultimer';
+        else assembly = '-';
+      }
+      const assemblyCat = categorizeAssembly(assembly, effectiveSubunits);
+      
+      const record: ProteinComplexRecord = {
+        complexId,
+        name,
+        aliases,
+        taxonomyId: taxId,
+        species,
+        assembly,
+        assemblyCategory: assemblyCat,
+        totalSubunits: effectiveSubunits,
+        distinctSubunits: participants.length,
+        participants,
+        description: cols[9]?.trim() || '',
+        properties: cols[10]?.trim() || '',
+        goAnnotations: cols[7] && cols[7] !== '-' ? cols[7].split('|').map(s => s.trim()) : [],
+        crossReferences: cols[8] && cols[8] !== '-' ? cols[8].split('|').map(s => s.trim()) : [],
+        evidence: cols[5]?.trim() || ''
+      };
+      records.push(record);
+    }
+    return records;
+  }
+
+  const yeast = parseComplexesFile('YeastCOMPLEXportal559292.tsv', 'yeast', '559292');
+  const human = parseComplexesFile('HumanCOMPLEXportal9606.tsv', 'human', '9606');
+  allComplexes.push(...human, ...yeast);
+
+  for (const c of allComplexes) {
+    complexIdMap.set(c.complexId.toUpperCase(), c);
+    for (const p of c.participants) {
+      const keys = new Set([
+        p.symbol.toUpperCase(),
+        ...(p.allGeneNames || []).map(g => g.toUpperCase()),
+        p.identifier.toUpperCase()
+      ]);
+      for (const k of keys) {
+        if (!complexGeneIndex.has(k)) complexGeneIndex.set(k, []);
+        complexGeneIndex.get(k)!.push(c);
+      }
+    }
+  }
+
+  console.log(`Loaded ${allComplexes.length} Protein Complexes (Human: ${human.length}, Yeast: ${yeast.length}). Indexed ${complexGeneIndex.size} gene symbols/identifiers.`);
+} catch (e) {
+  console.warn("Failed to load Complex Portal TSVs:", e);
 }
 
 async function startServer() {
@@ -203,6 +358,28 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
   return { studyType: 'classic', experimentType: 'classical genetics' };
 }
 
+// In-memory cache for mapping ORF names / SGD IDs to standard yeast symbols for backup TSV lookup
+const yeastSymbolCache = new Map<string, string>();
+const resolveYeastSymbolForBackup = async (identifier: string): Promise<string | null> => {
+  const clean = identifier.replace(/^SGD:/i, '').trim().toUpperCase();
+  if (!clean || clean === 'UNKNOWN') return null;
+  if (yeastSymbolCache.has(clean)) return yeastSymbolCache.get(clean)!;
+  try {
+    const url = `https://mygene.info/v3/query?q=${encodeURIComponent(clean)}&species=559292,4932&fields=symbol`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const hit = data.hits?.[0];
+    if (hit?.symbol) {
+      yeastSymbolCache.set(clean, hit.symbol);
+      return hit.symbol;
+    }
+  } catch (e) {
+    console.warn(`[resolveYeastSymbolForBackup] Lookup error for ${identifier}:`, e);
+  }
+  return null;
+};
+
   // Proxy /api/phenotypes
   // Uses Alliance of Genome Resources (AGR) as primary sustainable API (since SGD yeastgenome.org is being absorbed into AGR),
   // with fallback to local SGDphenotypes.tsv / SQLite database.
@@ -295,8 +472,8 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
           }
       }
 
-      console.log(`Falling back to local DB/TSV for phenotypes.`);
-      // 2. Try Local SQLite Database
+      console.log(`Checking local DB/TSV as backup source for phenotypes.`);
+      // 2. BACKUP SOURCE: If primary AGR API returned no records, query local SQLite or SGDphenotypes.tsv
       let localRecords: any[] = [];
       if (db) {
         if (symbol) {
@@ -308,14 +485,34 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         }
       }
 
-      // 2.5. Try Local TSV Database (data/SGDphenotypes.tsv)
-      if (localRecords.length === 0 && tsvDb && symbol) {
-        const querySymbol = symbol.toUpperCase();
-        localRecords = tsvDb.filter((r) => r.Gene_Name && r.Gene_Name.toUpperCase() === querySymbol);
+      // Check SGDphenotypes.tsv as backup source
+      if (localRecords.length === 0 && tsvDb) {
+        let querySymbol = (symbol || '').toUpperCase().trim();
+        const cleanedId = (sgdId || '').replace(/^SGD:/i, '').trim().toUpperCase();
+
+        if (querySymbol) {
+          localRecords = tsvDb.filter((r) => r.Gene_Name && r.Gene_Name.toUpperCase() === querySymbol);
+        }
+        if (localRecords.length === 0 && cleanedId && cleanedId !== "UNKNOWN") {
+          localRecords = tsvDb.filter((r) => 
+            (r.Gene_Name && r.Gene_Name.toUpperCase() === cleanedId)
+          );
+        }
+
+        // If not found yet and symbol/sgdId is an ORF name (e.g. YAL038W) or SGD ID (S00000...),
+        // dynamically resolve to standard yeast gene symbol via MyGene.info
+        if (localRecords.length === 0 && (querySymbol || cleanedId)) {
+          const lookupTerm = querySymbol || cleanedId;
+          const resolvedSymbol = await resolveYeastSymbolForBackup(lookupTerm);
+          if (resolvedSymbol) {
+            console.log(`Resolved ${lookupTerm} to standard yeast symbol ${resolvedSymbol} for backup SGDphenotypes.tsv lookup`);
+            localRecords = tsvDb.filter((r) => r.Gene_Name && r.Gene_Name.toUpperCase() === resolvedSymbol.toUpperCase());
+          }
+        }
       }
 
       if (localRecords.length > 0) {
-        console.log(`Found ${localRecords.length} records in local DB/TSV for ${symbol || sgdId}`);
+        console.log(`Found ${localRecords.length} records in backup SGDphenotypes.tsv for ${symbol || sgdId}`);
 
         // Group local records by phenotype statement to consolidate classic vs high-throughput studies
         const grouped = new Map<string, {
@@ -326,24 +523,22 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
         }>();
 
         for (const row of localRecords) {
-          let chem = row.Chemical && row.Chemical !== '""""""' && row.Chemical.trim() ? row.Chemical : '';
-          let detailCondition = row.Details && row.Details !== '""""""' && row.Details.trim() ? row.Details.trim() : '';
-          let mutantType = row.Mutant_Type && row.Mutant_Type.trim() ? row.Mutant_Type.trim() : '';
+          const chem = row.Chemical && row.Chemical !== '""""""' ? row.Chemical.trim() : '';
+          const detail = row.Details && row.Details !== '""""""' ? row.Details.trim() : '';
+          const pheno = row.Phenotype && row.Phenotype !== '""""""' ? row.Phenotype.trim() : '';
+          const cond = row.Condition && row.Condition !== '""""""' ? row.Condition.trim() : '';
+          const mutantType = row.Mutant_Type && row.Mutant_Type !== '""""""' ? row.Mutant_Type.trim() : '';
 
-          let phenotypeStatement = '';
-          if (chem && detailCondition) {
-             phenotypeStatement = `${chem} (Condition: ${detailCondition})`;
-          } else if (chem) {
-             phenotypeStatement = chem;
-          } else if (detailCondition) {
-             phenotypeStatement = `Phenotype affected by ${detailCondition}`;
-          } else {
-             phenotypeStatement = `Observed phenotype`;
-          }
+          const parts: string[] = [];
+          if (detail) parts.push(detail);
+          if (chem) parts.push(chem);
+          if (parts.length === 0 && pheno) parts.push(pheno);
+          if (parts.length === 0 && cond) parts.push(`Condition: ${cond}`);
 
-          if (mutantType) {
-             const capitalizedMutantType = mutantType.charAt(0).toUpperCase() + mutantType.slice(1);
-             phenotypeStatement = `${capitalizedMutantType}: ${phenotypeStatement}`;
+          let phenotypeStatement = parts.length > 0 ? parts.join(' - ') : 'Observed phenotype';
+          if (mutantType && !phenotypeStatement.toLowerCase().startsWith(mutantType.toLowerCase())) {
+            const capitalizedMutantType = mutantType.charAt(0).toUpperCase() + mutantType.slice(1);
+            phenotypeStatement = `${capitalizedMutantType}: ${phenotypeStatement}`;
           }
 
           const isClassic = (row.Experiment_Type || '').toLowerCase() === 'classical genetics';
@@ -794,6 +989,20 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
     }
 
     if (!pChange) pChange = clin?.variant_id ? `Variant ${clin.variant_id}` : 'p.?';
+
+    // Strictly enforce missense only: reject Termination (Ter / * / X) and frameshifts / indels
+    if (
+      /\bTer\b/i.test(pChange) ||
+      pChange.includes('*') ||
+      /\bdel\b/i.test(pChange) ||
+      /\bins\b/i.test(pChange) ||
+      /\bdup\b/i.test(pChange) ||
+      /\bfs\b/i.test(pChange) ||
+      /\bext\b/i.test(pChange)
+    ) {
+      return null;
+    }
+
     let cleanHgvs = pChange;
     const hgvsMatch = cleanHgvs.match(/p\.([A-Z][a-z]{2}\d+[A-Z][a-z]{2})/);
     if (hgvsMatch) {
@@ -1946,6 +2155,889 @@ function classifyPhenotypeAnnotation(allele?: string, citation?: string, conditi
     }
   });
 
+  // --- Protein Complexes (Complex Portal - Human 9606 & Yeast 559292) API Routes ---
+  app.get('/api/complexes/search', (req, res) => {
+    try {
+      const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+      const species = typeof req.query.species === 'string' ? req.query.species.toLowerCase() : 'all';
+      const assembly = typeof req.query.assembly === 'string' ? req.query.assembly : 'all';
+      const page = Math.max(1, parseInt(req.query.page as string || '1', 10));
+      const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize as string || '20', 10)));
+
+      const normQ = q.toLowerCase();
+      const upperQ = q.toUpperCase();
+
+      const assemblyCounts: Record<string, number> = {};
+      let humanCount = 0;
+      let yeastCount = 0;
+
+      const matched: { complex: ProteinComplexRecord; score: number }[] = [];
+
+      for (const c of allComplexes) {
+        if (species !== 'all' && c.species !== species) continue;
+        if (assembly !== 'all' && c.assemblyCategory.toLowerCase() !== assembly.toLowerCase()) continue;
+
+        if (c.species === 'human') humanCount++;
+        else if (c.species === 'yeast') yeastCount++;
+        assemblyCounts[c.assemblyCategory] = (assemblyCounts[c.assemblyCategory] || 0) + 1;
+
+        if (!normQ) {
+          matched.push({ complex: c, score: 0 });
+          continue;
+        }
+
+        let score = 0;
+        // 1. Exact or partial complex ID match
+        if (c.complexId.toUpperCase() === upperQ) {
+          score += 1000;
+        } else if (c.complexId.toLowerCase().includes(normQ)) {
+          score += 200;
+        }
+
+        // 2. Participant exact gene symbol match (highest priority for gene queries like MSH2)
+        const exactParticipant = c.participants.some(p => 
+          p.symbol.toUpperCase() === upperQ || 
+          p.identifier.toUpperCase() === upperQ ||
+          p.allGeneNames?.some(g => g.toUpperCase() === upperQ)
+        );
+        if (exactParticipant) {
+          score += 600;
+        } else {
+          const partialParticipant = c.participants.some(p => 
+            p.symbol.toLowerCase().includes(normQ) || 
+            p.identifier.toLowerCase().includes(normQ) ||
+            p.allGeneNames?.some(g => g.toLowerCase().includes(normQ))
+          );
+          if (partialParticipant) score += 180;
+        }
+
+        // 3. Complex name match
+        if (c.name.toLowerCase() === normQ) {
+          score += 350;
+        } else if (c.name.toLowerCase().includes(normQ)) {
+          score += 120;
+        }
+
+        // 4. Aliases match
+        if (c.aliases.some(a => a.toLowerCase() === normQ)) {
+          score += 150;
+        } else if (c.aliases.some(a => a.toLowerCase().includes(normQ))) {
+          score += 70;
+        }
+
+        // 5. Assembly match (e.g., user searches 'dimer', 'heterotrimer', 'tetramer')
+        if (c.assembly.toLowerCase().includes(normQ) || c.assemblyCategory.toLowerCase().includes(normQ)) {
+          score += 90;
+        }
+
+        // 6. Description & GO annotations
+        if (c.description.toLowerCase().includes(normQ)) {
+          score += 25;
+        }
+        if (c.goAnnotations.some(g => g.toLowerCase().includes(normQ))) {
+          score += 15;
+        }
+
+        if (score > 0) {
+          matched.push({ complex: c, score });
+        }
+      }
+
+      // Sort by relevance score desc, then distinct subunits desc
+      matched.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return b.complex.distinctSubunits - a.complex.distinctSubunits;
+      });
+
+      const total = matched.length;
+      const startIndex = (page - 1) * pageSize;
+      const paginated = matched.slice(startIndex, startIndex + pageSize).map(m => m.complex);
+
+      return res.json({
+        total,
+        returned: paginated.length,
+        page,
+        pageSize,
+        complexes: paginated,
+        assemblyCounts,
+        speciesCounts: { human: humanCount, yeast: yeastCount }
+      });
+    } catch (e: any) {
+      console.error("Complexes search error:", e);
+      return res.status(500).json({ error: e.message || 'Internal error searching complexes' });
+    }
+  });
+
+  app.get('/api/complexes/gene/:gene', (req, res) => {
+    try {
+      const gene = req.params.gene?.trim();
+      if (!gene) return res.status(400).json({ error: 'Missing gene parameter' });
+      const upperGene = gene.toUpperCase();
+      const hits = complexGeneIndex.get(upperGene) || [];
+      const seen = new Set<string>();
+      const uniqueHits = hits.filter(h => {
+        if (seen.has(h.complexId)) return false;
+        seen.add(h.complexId);
+        return true;
+      });
+      return res.json({
+        gene,
+        count: uniqueHits.length,
+        complexes: uniqueHits
+      });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/complexes/:complexId', (req, res) => {
+    try {
+      const cid = req.params.complexId?.trim().toUpperCase();
+      if (!cid) return res.status(400).json({ error: 'Missing complexId' });
+      const found = complexIdMap.get(cid);
+      if (!found) return res.status(404).json({ error: `Complex ${cid} not found` });
+      return res.json(found);
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // --- Search All Variants Across a Whole Protein Complex ---
+  const complexVariantsCache = new Map<string, any>();
+  const AA3_TO_1: Record<string, string> = {
+    Ala: 'A', Arg: 'R', Asn: 'N', Asp: 'D', Cys: 'C', Gln: 'Q', Glu: 'E', Gly: 'G',
+    His: 'H', Ile: 'I', Leu: 'L', Lys: 'K', Met: 'M', Phe: 'F', Pro: 'P', Ser: 'S',
+    Thr: 'T', Trp: 'W', Tyr: 'Y', Val: 'V', Ter: '*'
+  };
+
+  app.get('/api/complexes/:complexId/variants', async (req, res) => {
+    try {
+      const cid = req.params.complexId?.trim().toUpperCase();
+      if (!cid) return res.status(400).json({ error: 'Missing complexId' });
+      const complex = complexIdMap.get(cid);
+      if (!complex) return res.status(404).json({ error: `Complex ${cid} not found` });
+
+      if (complexVariantsCache.has(cid)) {
+        return res.json(complexVariantsCache.get(cid));
+      }
+
+      // Determine subunit genes to search
+      interface SubunitTarget {
+        queryGene: string;
+        displayGene: string;
+        yeastGene?: string;
+        identifier: string;
+      }
+      const targetSubunits: SubunitTarget[] = [];
+      const seenGenes = new Set<string>();
+
+      if (complex.species === 'human') {
+        for (const p of complex.participants) {
+          const gUpper = p.symbol.toUpperCase();
+          if (!seenGenes.has(gUpper)) {
+            seenGenes.add(gUpper);
+            targetSubunits.push({
+              queryGene: p.symbol,
+              displayGene: p.symbol,
+              identifier: p.identifier
+            });
+          }
+        }
+      } else {
+        // Yeast complex: Map to human orthologs so user can model the whole complex's variants in yeast
+        for (const p of complex.participants) {
+          const yUpper = p.symbol.toUpperCase();
+          const humanOrthologs = yeastToHumanOrthologMap.get(yUpper) || [];
+          if (humanOrthologs.length > 0) {
+            for (const h of humanOrthologs.slice(0, 2)) {
+              if (!seenGenes.has(h)) {
+                seenGenes.add(h);
+                targetSubunits.push({
+                  queryGene: h,
+                  displayGene: h,
+                  yeastGene: p.symbol,
+                  identifier: p.identifier
+                });
+              }
+            }
+          } else {
+            if (!seenGenes.has(yUpper)) {
+              seenGenes.add(yUpper);
+              targetSubunits.push({
+                queryGene: p.symbol,
+                displayGene: p.symbol,
+                yeastGene: p.symbol,
+                identifier: p.identifier
+              });
+            }
+          }
+        }
+      }
+
+      // ClinVar API key from environment (kept securely on the server)
+      const clinVarApiKey = (process.env.ClinVarAPI || process.env.CLINVAR_API_KEY || process.env.NCBI_API_KEY || '').trim();
+
+      // Query MyVariant.info for all subunits in parallel
+      const fields = 'clinvar,dbnsfp.alphamissense,gnomad_genome.af,gnomad_exome.af';
+      const subunitResults = await Promise.all(targetSubunits.map(async (sub) => {
+        try {
+          const url = `https://myvariant.info/v1/query?q=clinvar.gene.symbol:${encodeURIComponent(sub.queryGene)}&fields=${fields}&size=400`;
+          const resp = await fetch(url, { signal: AbortSignal.timeout(10000) });
+          if (!resp.ok) return { sub, hits: [] };
+          const data = await resp.json();
+          return { sub, hits: (data.hits || []) as any[] };
+        } catch (e: any) {
+          console.warn(`Failed to fetch variants for complex subunit ${sub.queryGene}:`, e.message);
+          return { sub, hits: [] };
+        }
+      }));
+
+      // Parse and normalize variants
+      const allVariants: any[] = [];
+      const seenVariantIds = new Set<string>();
+      const conflictVcvIds: string[] = [];
+
+      for (const { sub, hits } of subunitResults) {
+        for (const hit of hits) {
+          const cv = hit.clinvar;
+          if (!cv) continue;
+          const varId = String(cv.variant_id || hit._id || '');
+          if (!varId || seenVariantIds.has(varId)) continue;
+          seenVariantIds.add(varId);
+
+          const rcvs: any[] = Array.isArray(cv.rcv) ? cv.rcv : (cv.rcv ? [cv.rcv] : []);
+          
+          // Determine protein change
+          let rawProtein = '';
+          for (const r of rcvs) {
+            if (r?.preferred_name && r.preferred_name.includes('p.')) {
+              rawProtein = r.preferred_name;
+              break;
+            }
+          }
+          if (!rawProtein) {
+            const hgvsProt = cv.hgvs?.protein;
+            if (Array.isArray(hgvsProt) && hgvsProt.length > 0) rawProtein = hgvsProt[0];
+            else if (typeof hgvsProt === 'string') rawProtein = hgvsProt;
+          }
+          if (!rawProtein && hit._id) rawProtein = hit._id;
+
+          let proteinChange = 'N/A';
+          let residue = 0;
+          let refAA = '-';
+          let targetAA = '-';
+
+          const pMatch = rawProtein.match(/p\.([A-Za-z]{3}|\b[A-Z]\b)(\d+)([A-Za-z]{3}|\b[A-Z]\b|\*|=|\w+fs)/);
+          if (pMatch) {
+            const ref3 = pMatch[1];
+            const resNum = parseInt(pMatch[2], 10);
+            const tgt3 = pMatch[3];
+            // Reject termination and frameshift mutations
+            if (ref3 === 'Ter' || tgt3 === 'Ter' || tgt3 === '*' || tgt3.includes('fs') || tgt3 === '=') {
+              continue;
+            }
+            residue = resNum;
+            refAA = ref3.length === 3 ? (AA3_TO_1[ref3] || ref3) : ref3;
+            targetAA = tgt3.length === 3 ? (AA3_TO_1[tgt3] || tgt3) : tgt3;
+            if (refAA === '*' || targetAA === '*' || refAA === targetAA) {
+              continue;
+            }
+            proteinChange = `p.${ref3}${resNum}${tgt3}`;
+          } else {
+            // If it doesn't match standard missense pattern, discard
+            continue;
+          }
+
+          // Clinical significance terms
+          const allSigTerms: string[] = [];
+          let maxStars = 0;
+          let topReviewStatus = '';
+          let primaryRcvId = '';
+
+          for (const r of rcvs) {
+            if (r?.clinical_significance) {
+              if (Array.isArray(r.clinical_significance)) {
+                r.clinical_significance.forEach((s: any) => allSigTerms.push(String(s).toLowerCase().trim()));
+              } else {
+                allSigTerms.push(String(r.clinical_significance).toLowerCase().trim());
+              }
+            }
+            if (r?.accession && !primaryRcvId) primaryRcvId = r.accession;
+            const status = String(r?.review_status || '');
+            if (status) {
+              let stars = 0;
+              const sLow = status.toLowerCase();
+              if (sLow.includes('practice guideline')) stars = 4;
+              else if (sLow.includes('expert panel')) stars = 3;
+              else if (sLow.includes('multiple submitters') && !sLow.includes('conflicting')) stars = 2;
+              else if (sLow.includes('criteria provided') || sLow.includes('single submitter')) stars = 1;
+
+              if (stars > maxStars) {
+                maxStars = stars;
+                topReviewStatus = status;
+              } else if (!topReviewStatus) {
+                topReviewStatus = status;
+              }
+            }
+          }
+
+          if (allSigTerms.length === 0 && cv.clinical_significance) {
+            if (Array.isArray(cv.clinical_significance)) {
+              cv.clinical_significance.forEach((s: any) => allSigTerms.push(String(s).toLowerCase().trim()));
+            } else {
+              allSigTerms.push(String(cv.clinical_significance).toLowerCase().trim());
+            }
+          }
+
+          const hasExactPathogenic = allSigTerms.some(s => (s === 'pathogenic' || s.startsWith('pathogenic') || s === 'pathogenic/likely pathogenic') && !s.startsWith('likely pathogenic'));
+          const hasLikelyPathogenic = allSigTerms.some(s => s.includes('likely pathogenic'));
+          const hasExactBenign = allSigTerms.some(s => (s === 'benign' || s.startsWith('benign') || s === 'benign/likely benign') && !s.startsWith('likely benign'));
+          const hasLikelyBenign = allSigTerms.some(s => s.includes('likely benign'));
+          const hasUncertain = allSigTerms.some(s => s.includes('uncertain'));
+          const hasConflicting = allSigTerms.some(s => s.includes('conflicting'));
+
+          const isPathBenignConflict = (hasExactPathogenic || hasLikelyPathogenic) && (hasExactBenign || hasLikelyBenign);
+          const isConflicted = hasConflicting || isPathBenignConflict || (hasUncertain && (hasExactPathogenic || hasLikelyPathogenic || hasExactBenign || hasLikelyBenign));
+
+          if (hasConflicting && cv.variant_id) {
+            conflictVcvIds.push(String(cv.variant_id));
+          }
+
+          let clinicalSignificance = 'Unknown';
+          if (isConflicted) clinicalSignificance = 'Conflicting';
+          else if (hasExactPathogenic) clinicalSignificance = 'Pathogenic';
+          else if (hasLikelyPathogenic) clinicalSignificance = 'Likely Pathogenic';
+          else if (hasExactBenign) clinicalSignificance = 'Benign';
+          else if (hasLikelyBenign) clinicalSignificance = 'Likely Benign';
+          else if (hasUncertain) clinicalSignificance = 'VUS';
+
+          // AlphaMissense Score
+          let amScore: number | null = null;
+          let amClassification: 'Pathogenic' | 'Benign' | 'Ambiguous' | null = null;
+          const amRaw = hit.dbnsfp?.alphamissense?.score;
+          if (amRaw !== undefined && amRaw !== null) {
+            if (Array.isArray(amRaw)) {
+              const nums = amRaw.map(Number).filter(n => !isNaN(n));
+              if (nums.length > 0) amScore = parseFloat((nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(4));
+            } else {
+              const num = parseFloat(amRaw);
+              if (!isNaN(num)) amScore = parseFloat(num.toFixed(4));
+            }
+          }
+          if (amScore !== null) {
+            if (amScore >= 0.564) amClassification = 'Pathogenic';
+            else if (amScore <= 0.34) amClassification = 'Benign';
+            else amClassification = 'Ambiguous';
+          }
+
+          // gnomAD Allele Frequency
+          let gnomadFreq: number | null = null;
+          const gRaw = hit.gnomad_genome?.af || hit.gnomad_exome?.af;
+          if (gRaw !== undefined && gRaw !== null) {
+            const gNum = parseFloat(Array.isArray(gRaw) ? gRaw[0] : gRaw);
+            if (!isNaN(gNum)) gnomadFreq = gNum;
+          }
+
+          allVariants.push({
+            id: varId,
+            gene: sub.displayGene,
+            yeastGene: sub.yeastGene,
+            uniprotId: sub.identifier,
+            proteinChange,
+            residue,
+            refAA,
+            targetAA,
+            hgvs: hit._id || '',
+            clinicalSignificance,
+            isConflictingPathBenign: isPathBenignConflict,
+            conflictingSummary: isPathBenignConflict ? `${hasExactPathogenic ? 'Path' : 'Likely Path'} vs ${hasExactBenign ? 'Benign' : 'Likely Benign'}${hasUncertain ? ' (+VUS)' : ''}` : undefined,
+            reviewStatus: topReviewStatus || 'criteria provided',
+            clinVarStars: maxStars,
+            clinVarId: primaryRcvId || '',
+            clinVarVariantId: cv.variant_id ? String(cv.variant_id) : undefined,
+            amScore,
+            amClassification,
+            gnomadFreq
+          });
+        }
+      }
+
+      // If conflicting variants exist and ClinVarAPI key is present, resolve detailed assertions for any conflicting variants
+      if (conflictVcvIds.length > 0 && clinVarApiKey && conflictVcvIds.length <= 40) {
+        try {
+          const vcvIdsFormatted = conflictVcvIds.slice(0, 40).map(id => `VCV${id.padStart(9, '0')}`).join(',');
+          const vcvUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=clinvar&rettype=vcv&id=${vcvIdsFormatted}&api_key=${encodeURIComponent(clinVarApiKey)}`;
+          const vcvRes = await fetch(vcvUrl, { signal: AbortSignal.timeout(6000) });
+          if (vcvRes.ok) {
+            const vcvXml = await vcvRes.text();
+            const archives = vcvXml.match(/<VariationArchive[^>]*>[\s\S]*?<\/VariationArchive>/g) || [];
+            for (const arch of archives) {
+              const idMatch = arch.match(/VariationID="(\d+)"/);
+              if (!idMatch) continue;
+              const vid = idMatch[1];
+              const classifications = [...arch.matchAll(/<Classification[^>]*>[\s\S]*?<GermlineClassification[^>]*>([^<]+)<\/GermlineClassification>/g)]
+                .map(m => m[1].toLowerCase().trim());
+              const hasP = classifications.some(c => c.includes('pathogenic') && !c.startsWith('likely'));
+              const hasLp = classifications.some(c => c.includes('likely pathogenic'));
+              const hasB = classifications.some(c => c.includes('benign') && !c.startsWith('likely'));
+              const hasLb = classifications.some(c => c.includes('likely benign'));
+              const hasU = classifications.some(c => c.includes('uncertain'));
+              const isPbConflict = (hasP || hasLp) && (hasB || hasLb);
+
+              const matching = allVariants.find(v => v.clinVarVariantId === vid);
+              if (matching) {
+                matching.isConflictingPathBenign = isPbConflict;
+                if (isPbConflict) {
+                  matching.conflictingSummary = `${hasP ? 'Path' : 'Likely Path'} vs ${hasB ? 'Benign' : 'Likely Benign'}${hasU ? ' (+VUS)' : ''}`;
+                }
+              }
+            }
+          }
+        } catch (e: any) {
+          console.warn("Complex VCV batch resolve note:", e.message);
+        }
+      }
+
+      // Sort variants: Pathogenic & Conflicting first, then residue order
+      const sigOrder: Record<string, number> = {
+        'Pathogenic': 1,
+        'Likely Pathogenic': 2,
+        'Conflicting': 3,
+        'VUS': 4,
+        'Likely Benign': 5,
+        'Benign': 6,
+        'Unknown': 7
+      };
+      allVariants.sort((a, b) => {
+        const orderA = sigOrder[a.clinicalSignificance] || 9;
+        const orderB = sigOrder[b.clinicalSignificance] || 9;
+        if (orderA !== orderB) return orderA - orderB;
+        if (a.gene !== b.gene) return a.gene.localeCompare(b.gene);
+        return a.residue - b.residue;
+      });
+
+      // Calculate subunit statistics
+      const subunitsStats = targetSubunits.map(sub => {
+        const subVars = allVariants.filter(v => v.gene === sub.displayGene);
+        return {
+          symbol: sub.displayGene,
+          yeastSymbol: sub.yeastGene,
+          identifier: sub.identifier,
+          variantCount: subVars.length,
+          pathCount: subVars.filter(v => v.clinicalSignificance === 'Pathogenic' || v.clinicalSignificance === 'Likely Pathogenic').length,
+          vusCount: subVars.filter(v => v.clinicalSignificance === 'VUS').length,
+          benignCount: subVars.filter(v => v.clinicalSignificance === 'Benign' || v.clinicalSignificance === 'Likely Benign').length,
+          conflictCount: subVars.filter(v => v.clinicalSignificance === 'Conflicting').length
+        };
+      });
+
+      // Aggregate significance counts
+      const significanceCounts: Record<string, number> = {};
+      for (const v of allVariants) {
+        significanceCounts[v.clinicalSignificance] = (significanceCounts[v.clinicalSignificance] || 0) + 1;
+      }
+
+      const responsePayload = {
+        complexId: complex.complexId,
+        name: complex.name,
+        assembly: complex.assembly,
+        species: complex.species,
+        subunits: subunitsStats,
+        totalVariants: allVariants.length,
+        variants: allVariants,
+        significanceCounts
+      };
+
+      complexVariantsCache.set(cid, responsePayload);
+      return res.json(responsePayload);
+    } catch (err: any) {
+      console.error("Failed to fetch complex variants:", err);
+      return res.status(500).json({ error: err.message || 'Internal error searching complex variants' });
+    }
+  });
+
+  // --- Clinician Variant Submission Portal API (Dr. Wasko VUS Intake) ---
+  const submissionsFilePath = path.join(process.cwd(), 'clinician_submissions.json');
+  const portalConfigPath = path.join(process.cwd(), 'clinician_portal.config.json');
+
+  const getPortalRecipientEmail = (): string => {
+    try {
+      if (fs.existsSync(portalConfigPath)) {
+        const cfg = JSON.parse(fs.readFileSync(portalConfigPath, 'utf-8'));
+        if (cfg?.recipientEmail) return cfg.recipientEmail.trim();
+      }
+    } catch {}
+    return (process.env.CLINICIAN_PORTAL_RECIPIENT || 'VUS@wasko.org').trim();
+  };
+
+  const loadSubmissions = (): any[] => {
+    try {
+      if (fs.existsSync(submissionsFilePath)) {
+        return JSON.parse(fs.readFileSync(submissionsFilePath, 'utf-8'));
+      }
+    } catch {}
+    return [];
+  };
+
+  const saveSubmission = (sub: any) => {
+    try {
+      const all = loadSubmissions();
+      all.unshift(sub);
+      fs.writeFileSync(submissionsFilePath, JSON.stringify(all, null, 2), 'utf-8');
+    } catch (e: any) {
+      console.warn("Failed to write to clinician_submissions.json:", e.message);
+    }
+  };
+
+  // PubMed Variant Search Helper for Grounded Scientific Literature
+  const searchPubMedForVariant = async (
+    geneSymbol: string,
+    missenseAllele: string,
+    pos?: number,
+    ref?: string,
+    target?: string
+  ): Promise<Array<{
+    pmid: string;
+    title: string;
+    authors: string;
+    source: string;
+    pubdate: string;
+    doi?: string;
+    url: string;
+  }>> => {
+    const articles: Array<any> = [];
+    try {
+      const gene = geneSymbol.trim();
+      const terms: string[] = [];
+      if (ref && pos && target) {
+        terms.push(`"${ref}${pos}${target}"`);
+      }
+      const cleanAllele = missenseAllele.replace(/^p\./, '').trim();
+      if (cleanAllele) {
+        terms.push(`"${cleanAllele}"`);
+      }
+      if (pos) {
+        terms.push(`"${pos}"`);
+      }
+
+      const queryTerm = terms.length > 0
+        ? `${gene} AND (${terms.slice(0, 3).join(' OR ')})`
+        : `${gene} AND "${missenseAllele}"`;
+
+      const searchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(queryTerm)}&retmode=json&retmax=4`;
+      const searchRes = await fetch(searchUrl, { signal: AbortSignal.timeout(4000) });
+      if (!searchRes.ok) return [];
+      const searchData = await searchRes.json();
+      const idList: string[] = searchData?.esearchresult?.idlist || [];
+
+      if (idList.length === 0) return [];
+
+      const summaryUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${idList.join(',')}&retmode=json`;
+      const summaryRes = await fetch(summaryUrl, { signal: AbortSignal.timeout(4000) });
+      if (!summaryRes.ok) return [];
+      const summaryData = await summaryRes.json();
+      const results = summaryData?.result || {};
+
+      for (const pmid of idList) {
+        const doc = results[pmid];
+        if (!doc) continue;
+        const authors = Array.isArray(doc.authors) && doc.authors.length > 0
+          ? `${doc.authors[0].name}${doc.authors.length > 1 ? ' et al.' : ''}`
+          : 'Authors not listed';
+        const title = doc.title || 'Untitled publication';
+        const source = doc.source || doc.fulljournalname || '';
+        const pubdate = doc.pubdate || doc.sortpubdate?.slice(0, 4) || '';
+        const doi = doc.articleids?.find((a: any) => a.idtype === 'doi')?.value;
+
+        articles.push({
+          pmid,
+          title: title.replace(/\.$/, ''),
+          authors,
+          source,
+          pubdate,
+          doi,
+          url: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`
+        });
+      }
+    } catch (err: any) {
+      console.warn('[PubMed Search] Note:', err?.message || err);
+    }
+    return articles;
+  };
+
+  app.post('/api/clinician-submission', async (req, res) => {
+    try {
+      const {
+        clinicianName,
+        clinicianEmail,
+        clinicianInstitution,
+        geneSymbol,
+        missenseAllele,
+        notes,
+        conservation,
+        clinicianEvaluation,
+        physicianEvaluation
+      } = req.body;
+
+      if (!geneSymbol || !missenseAllele) {
+        return res.status(400).json({ error: 'Missing required submission fields (geneSymbol, missenseAllele)' });
+      }
+
+      const recipientEmail = getPortalRecipientEmail();
+      const submissionId = `SUB-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+      const timestamp = new Date().toISOString();
+      const evalText = clinicianEvaluation || physicianEvaluation;
+
+      const record = {
+        id: submissionId,
+        timestamp,
+        clinicianName: clinicianName ? String(clinicianName).trim() : 'Clinician (Portal Submitter)',
+        clinicianEmail: clinicianEmail ? String(clinicianEmail).trim() : 'vus-intake@wasko.org',
+        clinicianInstitution: clinicianInstitution ? String(clinicianInstitution).trim() : undefined,
+        geneSymbol: String(geneSymbol).trim().toUpperCase(),
+        missenseAllele: String(missenseAllele).trim(),
+        notes: notes ? String(notes).trim() : undefined,
+        clinicianEvaluation: evalText ? String(evalText).trim() : undefined,
+        physicianEvaluation: evalText ? String(evalText).trim() : undefined,
+        conservation: conservation || {},
+        recipientEmail,
+        emailSent: false
+      };
+
+      // Email dispatch
+      let emailResult = { sent: false, error: '' };
+      const smtpHost = process.env.SMTP_HOST;
+      const smtpUser = process.env.SMTP_USER;
+      const smtpPass = process.env.SMTP_PASS;
+      const smtpPort = parseInt(process.env.SMTP_PORT || '587', 10);
+
+      const emailSubject = `[Conserved VUS Submission] ${record.geneSymbol} ${record.missenseAllele}`;
+      const emailBodyText = `CLINICIAN VARIANT SUBMISSION (BUDDY)
+=====================================
+Submission ID: ${submissionId}
+Timestamp: ${timestamp}
+
+SUBMITTED VARIANT:
+- Human Gene: ${record.geneSymbol}
+- Missense Allele: ${record.missenseAllele}
+
+CONSERVATION IN YEAST (S. cerevisiae):
+- Status: ${conservation?.conservationStatus || 'Conserved'}
+- Yeast Ortholog: ${conservation?.yeastGene || 'N/A'} (DIOPT Score: ${conservation?.dioptScore ?? 'N/A'})
+- Aligned Yeast Residue: ${conservation?.yeastAA || ''}${conservation?.yeastPos || ''}
+- Local Homology: ${conservation?.localHomologyScore !== undefined ? `${conservation.localHomologyScore}%` : 'N/A'}
+
+${record.clinicianEvaluation ? `AI CLINICIAN MODELING EVALUATION (GEMINI PRO):
+=====================================
+${record.clinicianEvaluation}
+=====================================
+\n` : ''}ADDITIONAL NOTES:
+${record.notes || 'None provided.'}
+
+=====================================
+Automated notification from the BUDDY Clinician Variant Submission Portal.
+Target recipient: ${recipientEmail}`;
+
+      if (smtpHost && smtpUser && smtpPass) {
+        try {
+          const transporter = nodemailer.createTransport({
+            host: smtpHost,
+            port: smtpPort,
+            secure: smtpPort === 465,
+            auth: { user: smtpUser, pass: smtpPass }
+          });
+          await transporter.sendMail({
+            from: `"BUDDY Clinician Portal" <${smtpUser}>`,
+            to: recipientEmail,
+            replyTo: record.clinicianEmail,
+            subject: emailSubject,
+            text: emailBodyText
+          });
+          emailResult = { sent: true, error: '' };
+          record.emailSent = true;
+        } catch (e: any) {
+          console.warn("[Clinician Portal] SMTP send error:", e.message);
+          emailResult = { sent: false, error: e.message };
+        }
+      } else {
+        console.log(`[Clinician Portal] Submission ${submissionId} recorded for ${recipientEmail}. (Saved to clinician_submissions.json).`);
+      }
+
+      saveSubmission(record);
+
+      const mailtoUrl = `mailto:${encodeURIComponent(recipientEmail)}?subject=${encodeURIComponent(emailSubject)}&body=${encodeURIComponent(emailBodyText)}`;
+
+      return res.json({
+        success: true,
+        submissionId,
+        recipientEmail,
+        emailSent: emailResult.sent,
+        emailError: emailResult.error || undefined,
+        mailtoUrl,
+        record
+      });
+    } catch (e: any) {
+      console.error("Submission processing error:", e);
+      return res.status(500).json({ error: e.message || 'Internal server error processing submission' });
+    }
+  });
+
+  app.get('/api/clinician-submissions', (req, res) => {
+    try {
+      const submissions = loadSubmissions();
+      return res.json({ count: submissions.length, submissions });
+    } catch (e: any) {
+      return res.status(500).json({ error: e.message });
+    }
+  });
+
+  // Clinician Variant Model Evaluation using Gemini Pro with Grounded Search & AM Score Review
+  app.post('/api/clinician-model-evaluation', async (req, res) => {
+    try {
+      const {
+        geneSymbol,
+        missenseAllele,
+        clinicalNotes,
+        alignmentInfo,
+        variantInfo,
+        phenotypes,
+        structureImage
+      } = req.body;
+
+      if (!geneSymbol || !missenseAllele) {
+        return res.status(400).json({ error: 'Missing geneSymbol or missenseAllele for clinician evaluation.' });
+      }
+
+      // Grounded PubMed search for specific variant
+      const pubmedArticles = await searchPubMedForVariant(
+        geneSymbol,
+        missenseAllele,
+        alignmentInfo?.pos,
+        alignmentInfo?.canonicalRefAA || alignmentInfo?.refAA,
+        alignmentInfo?.targetAA
+      );
+
+      const pubmedSummary = pubmedArticles.length > 0
+        ? pubmedArticles.map((a, idx) => `[${idx + 1}] "${a.title}" - ${a.authors} (${a.source}, ${a.pubdate}). PMID: ${a.pmid}. DOI: ${a.doi || 'N/A'}`).join('\n')
+        : 'No variant-specific publications directly cataloged for this exact codon in PubMed index.';
+
+      const phenoList = Array.isArray(phenotypes) && phenotypes.length > 0
+        ? phenotypes.slice(0, 8).map((p: any) => `- ${p.phenotype}${p.category ? ` (Category: ${p.category})` : ''}`).join('\n')
+        : 'No specific phenotype anomalies logged in SGD.';
+
+      const alignmentSnippetText = alignmentInfo?.alignmentSnippet
+        ? `Alignment Window:\n  Human: ${alignmentInfo.alignmentSnippet.humanSeq}\n  Match: ${alignmentInfo.alignmentSnippet.matchLine}\n  Yeast: ${alignmentInfo.alignmentSnippet.yeastSeq}`
+        : 'N/A';
+
+      const amScoreVal = variantInfo?.amScore !== undefined && variantInfo?.amScore !== null ? variantInfo.amScore : null;
+      const amPredVal = variantInfo?.amPred || (amScoreVal !== null ? (amScoreVal >= 0.56 ? 'Likely Pathogenic' : amScoreVal <= 0.34 ? 'Likely Benign' : 'Ambiguous') : null);
+      const amScoreDisplay = amScoreVal !== null ? `${amScoreVal} (${amPredVal || 'Prediction'})` : 'Score not available for this variant';
+
+      const promptText = `You are a clinical genomics and yeast functional biology consultant assisting a clinician / clinical geneticist.
+Evaluate whether Saccharomyces cerevisiae (budding yeast) is an informative experimental model system to characterize this patient variant of uncertain significance (VUS).
+
+CLINICAL VARIANT PROFILE:
+- Human Gene: ${geneSymbol}
+- Missense Allele: ${missenseAllele}
+- Additional Notes: ${clinicalNotes || 'Variant under investigation.'}
+
+ALPHASENSE & CLINICAL PREDICTIONS (CRITICAL FOR REVIEW):
+- AlphaMissense In Silico Score: ${amScoreDisplay} (Interpretation threshold: >0.56 Likely Pathogenic, <0.34 Likely Benign, 0.34-0.56 Ambiguous)
+- ClinVar Classification: ${variantInfo?.clinicalSignificance || 'Uncertain significance'} ${variantInfo?.clinVarStars !== undefined ? `(${variantInfo.clinVarStars}★)` : ''}
+- gnomAD Population Frequency: ${variantInfo?.gnomadAf !== undefined && variantInfo?.gnomadAf !== null ? variantInfo.gnomadAf : 'Rare / Absent'}
+
+EVOLUTIONARY CONSERVATION & ORTHOLOGY (BUDDY PIPELINE):
+- Yeast Ortholog: ${alignmentInfo?.yeastGene || 'S. cerevisiae ortholog'} (DIOPT Score: ${alignmentInfo?.dioptScore ?? 'N/A'}/16)
+- Residue Mapping: Human ${alignmentInfo?.canonicalRefAA || ''}${alignmentInfo?.pos || ''} -> Yeast ${alignmentInfo?.yeastAA || ''}${alignmentInfo?.yeastPos || ''}
+- Conservation Status: ${alignmentInfo?.conservationStatus || 'Evaluated'}
+- Local Homology Score: ${alignmentInfo?.localHomologyScore !== undefined ? `${alignmentInfo.localHomologyScore}%` : 'N/A'}
+- ${alignmentSnippetText}
+
+YEAST PHENOTYPES FOR ORTHOLOG (SGD):
+${phenoList}
+
+GROUNDED PUBMED LITERATURE SEARCH ON THIS VARIANT:
+${pubmedSummary}
+
+${structureImage ? 'A 2D rendering of the 3D structural superposition of the human protein and its yeast ortholog (with the variant highlighted) is attached.' : ''}
+
+TASK FOR GEMINI:
+Write an exceptionally CONCISE, direct, plain-English clinical evaluation for the attending clinician.
+Do NOT write long disclaimers. Do NOT include a #4 paragraph. Output EXACTLY these 3 numbered sections:
+
+### 1. Clinician Executive Verdict: Yeast Model Feasibility
+- Direct bottom line & recommendation: State clearly whether prospective modeling in yeast is **STRONGLY RECOMMENDED**, **POTENTIALLY INFORMATIVE**, or **UNNECESSARY / NOT RECOMMENDED** for ${geneSymbol} ${missenseAllele}.
+- Crucial clinical evidence check: In your decision whether to recommend modeling or not in yeast, consider existing evidence. If solid, definitive data already exists (e.g., well-established pathogenic or benign classification in ClinVar with multiple submitters/expert review, deep mutational scanning [DMS / MaveDB] datasets, or clear published functional literature), there is LESS clinical need to model in yeast. Conversely, if the variant lacks functional literature and sits at a conserved position, prospective yeast functional modeling has high clinical value.
+- 1-2 punchy sentences summarizing the verdict.
+
+### 2. Biological Conservation & AlphaMissense Review
+- Explicitly review the AlphaMissense (AM) score (${amScoreDisplay}). Clarify if it predicts pathogenic, benign, or ambiguous, and evaluate whether yeast evolutionary conservation (${alignmentInfo?.conservationStatus || 'Evaluated'}, local homology: ${alignmentInfo?.localHomologyScore !== undefined ? `${alignmentInfo.localHomologyScore}%` : 'N/A'}) corroborates this in silico prediction.
+- Grounded PubMed literature: mention whether published PubMed literature exists for this variant (${pubmedArticles.length > 0 ? `found ${pubmedArticles.length} relevant PubMed paper(s)` : 'no literature characterization in PubMed for this codon, highlighting the clinical need for prospective functional modeling'}).
+
+### 3. Feasible Yeast Assays & Phenotypic Readouts
+- Direct experimental strategy (e.g. humanized cDNA rescue of null strain vs CRISPR-Cas9 editing of orthologous locus).
+- Specific yeast functional readout(s) available to distinguish pathogenic loss-of-function from benign variation (e.g. mutator assay, auxotrophic growth on selective/stress plates, temperature sensitivity).
+
+Tone: Sharp, professional, accessible to clinicians and medical geneticists. Total length: under 200 words. Absolutely no #4 section.
+Typography rule: Do NOT bold all text. Write standard regular weight text. Never wrap full sentences, entire bullet points, or paragraphs in double asterisks (**). Bold ONLY the bottom-line verdict status (e.g. **STRONGLY RECOMMENDED**, **POTENTIALLY INFORMATIVE**, or **UNNECESSARY / NOT RECOMMENDED**). All other descriptions and sentences must be in normal plain font.`;
+
+      const parts: any[] = [{ text: promptText }];
+
+      if (structureImage && typeof structureImage === 'string') {
+        const match = structureImage.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+        if (match) {
+          parts.push({
+            inlineData: {
+              mimeType: match[1],
+              data: match[2]
+            }
+          });
+        }
+      }
+
+      const ai = getAi();
+      let response;
+      try {
+        response = await ai.models.generateContent({
+          model: 'gemini-3.1-pro-preview',
+          contents: { parts },
+          config: {
+            tools: [{ googleSearch: {} }]
+          }
+        });
+      } catch (proErr: any) {
+        const formatted = formatGeminiError(proErr);
+        if (formatted.statusCode === 401) throw proErr;
+        console.warn("gemini-3.1-pro-preview failed with search tool, falling back to gemini-3.8-flash:", proErr.message);
+        try {
+          response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: { parts },
+            config: {
+              tools: [{ googleSearch: {} }]
+            }
+          });
+        } catch (flashErr: any) {
+          response = await ai.models.generateContent({
+            model: 'gemini-3.8-flash',
+            contents: { parts }
+          });
+        }
+      }
+
+      const evaluationText = response?.text || 'Evaluation generated successfully.';
+      return res.json({
+        success: true,
+        evaluationText,
+        pubmedArticles
+      });
+    } catch (err: any) {
+      console.error("Clinician Model Evaluation Error:", err);
+      const { message, statusCode } = formatGeminiError(err);
+      return res.status(statusCode).json({ error: message, message, status: statusCode });
+    }
+  });
+
 // Helper to format Gemini API errors into clean, actionable messages
 function formatGeminiError(err: any): { message: string; statusCode: number } {
   let rawMsg = String(err?.message || err || 'Gemini API Error');
@@ -2113,6 +3205,9 @@ function formatGeminiError(err: any): { message: string; statusCode: number } {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
+    app.get(['/VUS', '/VUS/*', '/vus', '/vus/*'], (req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
     app.get('*all', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
